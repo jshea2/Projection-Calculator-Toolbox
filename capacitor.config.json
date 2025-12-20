@@ -1,0 +1,13 @@
+{
+  "appId": "com.jshea2.projectioncalculatortoolbox",
+  "appName": "Projection Calculator Toolbox",
+  "webDir": "build",
+  "ios": {
+    "minVersion": "14.0",
+    "backgroundColor": "#020618",
+    "contentInset": "automatic"
+  },
+  "android": {
+    "backgroundColor": "#020618"
+  }
+}
