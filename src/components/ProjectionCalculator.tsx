@@ -429,6 +429,17 @@ export function ProjectionCalculator() {
 
       if (lensCameraRef.current) {
         lensCameraRef.current.srcObject = stream;
+
+        // Add event listeners to debug video loading
+        lensCameraRef.current.onloadedmetadata = () => {
+          console.log("Video metadata loaded", {
+            videoWidth: lensCameraRef.current?.videoWidth,
+            videoHeight: lensCameraRef.current?.videoHeight,
+            clientWidth: lensCameraRef.current?.clientWidth,
+            clientHeight: lensCameraRef.current?.clientHeight,
+          });
+        };
+
         await lensCameraRef.current.play();
         setLensCameraActive(true);
         setLensCameraError(null);
@@ -7674,8 +7685,13 @@ export function ProjectionCalculator() {
         style={{
           display: activeTab === "lens" ? "block" : "none",
           animation: activeTab === "lens" ? `${getSlideDirection("lens")} 0.3s ease-out` : "none",
+          height: "100vh",
+          width: "100vw",
+          position: "fixed",
+          top: 0,
+          left: 0,
+          zIndex: 1,
         }}
-        className="h-full"
       >
         <div className="relative w-full h-full" style={{ backgroundColor: "#000" }}>
           {/* Camera Video Feed */}
