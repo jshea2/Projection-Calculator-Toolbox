@@ -52,6 +52,7 @@ import appIcon from "../assets/app-icon.png";
 // FEATURE FLAGS - Set to false to hide features
 // ============================================
 const ENABLE_CAD_TAB = true; // Set to false to hide CAD tab for release
+const ENABLE_LENS_TAB = true; // Set to false to hide Lens tab during development
 
 // Custom SVG Icons
 const SurfacesIcon = ({ className }: { className?: string }) => (
@@ -116,6 +117,15 @@ const CADIcon = ({ className }: { className?: string }) => (
       <line x1="17.5" y1="19" x2="18.5" y2="18" strokeWidth="1" />
       <line x1="19.5" y1="21" x2="20.5" y2="20" strokeWidth="1.5" />
     </g>
+  </svg>
+);
+
+const LensIcon = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+    {/* Outer circle */}
+    <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="2" />
+    {/* Large inner filled circle creating crescent effect */}
+    <circle cx="15" cy="9" r="7" fill="currentColor" />
   </svg>
 );
 
@@ -347,21 +357,21 @@ export function ProjectionCalculator() {
 
   // Tab state
   const [activeTab, setActiveTab] = useState<
-    "resolution" | "projector" | "aspect" | "cad"
+    "resolution" | "projector" | "aspect" | "cad" | "lens"
   >("cad");
   const [previousTab, setPreviousTab] = useState<
-    "resolution" | "projector" | "aspect" | "cad"
+    "resolution" | "projector" | "aspect" | "cad" | "lens"
   >("cad");
 
   // Tab change handler with direction tracking
-  const handleTabChange = (newTab: "resolution" | "projector" | "aspect" | "cad") => {
+  const handleTabChange = (newTab: "resolution" | "projector" | "aspect" | "cad" | "lens") => {
     setPreviousTab(activeTab);
     setActiveTab(newTab);
   };
 
   // Helper to get slide direction based on tab order
-  const getSlideDirection = (tab: "resolution" | "projector" | "aspect" | "cad") => {
-    const tabOrder = ["cad", "projector", "resolution", "aspect"];
+  const getSlideDirection = (tab: "resolution" | "projector" | "aspect" | "cad" | "lens") => {
+    const tabOrder = ["cad", "projector", "resolution", "aspect", "lens"];
     // Use previousTab to determine direction since activeTab has already changed
     const currentIndex = tabOrder.indexOf(previousTab);
     const newIndex = tabOrder.indexOf(tab);
@@ -370,23 +380,90 @@ export function ProjectionCalculator() {
     return direction;
   };
 
+  // Lens Preview: Calculate projection rectangle size based on throw ratio and camera FOV
+  const calculateProjectionOverlay = (throwRatio: number, cameraHFOV: number) => {
+    // At a given distance D:
+    // - Projection width = D / throwRatio
+    // - Camera FOV width at distance D = 2 * D * tan(HFOV/2)
+    //
+    // Ratio of projection to camera view:
+    // projectionWidth / cameraViewWidth = (D / throwRatio) / (2 * D * tan(HFOV/2))
+    //                                    = 1 / (throwRatio * 2 * tan(HFOV/2))
+
+    const hfovRadians = (cameraHFOV * Math.PI) / 180;
+    const widthRatio = 1 / (throwRatio * 2 * Math.tan(hfovRadians / 2));
+
+    // Height ratio based on 16:9 aspect ratio
+    // VFOV can be derived from HFOV and aspect ratio
+    const cameraAspect = 16 / 9; // Assume camera is also 16:9
+    const vfovRadians = 2 * Math.atan(Math.tan(hfovRadians / 2) / cameraAspect);
+    const heightRatio = 1 / (throwRatio * PROJECTION_ASPECT_RATIO * 2 * Math.tan(vfovRadians / 2));
+
+    return { widthRatio, heightRatio };
+  };
+
+  // Lens Preview: Start camera stream
+  const startLensCamera = async () => {
+    try {
+      console.log("Starting lens camera...");
+      setLensCameraError(null);
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error("getUserMedia not supported");
+        setLensCameraError("Camera not supported on this device");
+        return;
+      }
+
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: "environment", // Rear camera
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      };
+
+      console.log("Requesting camera with constraints:", constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("Camera stream obtained:", stream);
+
+      if (lensCameraRef.current) {
+        lensCameraRef.current.srcObject = stream;
+        await lensCameraRef.current.play();
+        setLensCameraActive(true);
+        setLensCameraError(null);
+        console.log("Camera active and playing");
+      } else {
+        console.error("Camera ref not available");
+        setLensCameraError("Camera initialization failed");
+      }
+    } catch (error: any) {
+      console.error("Error accessing camera:", error);
+      const errorMsg = error.name === "NotAllowedError"
+        ? "Camera permission denied"
+        : error.name === "NotFoundError"
+        ? "No camera found"
+        : error.name === "NotReadableError"
+        ? "Camera already in use"
+        : "Camera unavailable - requires HTTPS or mobile device";
+      setLensCameraError(errorMsg);
+    }
+  };
+
+  // Lens Preview: Stop camera stream
+  const stopLensCamera = () => {
+    if (lensCameraRef.current && lensCameraRef.current.srcObject) {
+      const stream = lensCameraRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      lensCameraRef.current.srcObject = null;
+      setLensCameraActive(false);
+    }
+  };
+
   // Export fields
   const [projectTitle, setProjectTitle] = useState<string>("");
   const [projectNotes, setProjectNotes] = useState<string>("");
   const [clientName, setClientName] = useState<string>("");
-
-  // Lock orientation based on active tab
-  useEffect(() => {
-    if (Capacitor.isNativePlatform()) {
-      if (activeTab === "aspect") {
-        // Allow all orientations on Aspect Ratio tab
-        ScreenOrientation.unlock();
-      } else {
-        // Lock to portrait on all other tabs
-        ScreenOrientation.lock({ orientation: "portrait" });
-      }
-    }
-  }, [activeTab]);
 
   // Aspect Ratio Estimator states
   const [estimatorImage, setEstimatorImage] = useState<
@@ -432,6 +509,120 @@ export function ProjectionCalculator() {
     "2.39:1": 2.39 / 1,
     "1:1": 1 / 1,
   };
+
+  // Lens Preview (Camera Viewfinder) states
+  const [lensThrowRatio, setLensThrowRatio] = useState<number>(1.5); // Default short throw
+  const [lensCameraActive, setLensCameraActive] = useState(false);
+  const [lensUseWideCamera, setLensUseWideCamera] = useState(false);
+  const [lensCameraError, setLensCameraError] = useState<string | null>(null);
+  const lensCameraRef = useRef<HTMLVideoElement>(null);
+  const lensCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Camera field of view constants (approximate for common phone cameras)
+  const CAMERA_HFOV_NORMAL = 68; // degrees, typical 1x camera
+  const CAMERA_HFOV_WIDE = 120; // degrees, typical 0.5x ultra-wide camera
+  const PROJECTION_ASPECT_RATIO = 16 / 9; // Standard projector aspect
+
+  // Lock orientation based on active tab - updated to include lens landscape mode
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      if (activeTab === "aspect") {
+        // Allow all orientations on Aspect Ratio tab
+        ScreenOrientation.unlock();
+      } else if (activeTab === "lens") {
+        // Lock to landscape on Lens Preview tab
+        ScreenOrientation.lock({ orientation: "landscape" });
+      } else {
+        // Lock to portrait on all other tabs
+        ScreenOrientation.lock({ orientation: "portrait" });
+      }
+    }
+  }, [activeTab]);
+
+  // Start/stop camera when entering/leaving Lens tab
+  useEffect(() => {
+    if (activeTab === "lens") {
+      startLensCamera();
+    } else {
+      stopLensCamera();
+    }
+
+    // Cleanup on unmount
+    return () => {
+      stopLensCamera();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Draw projection overlay on canvas
+  useEffect(() => {
+    if (!lensCameraActive || !lensCanvasRef.current || !lensCameraRef.current) {
+      return;
+    }
+
+    const canvas = lensCanvasRef.current;
+    const video = lensCameraRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Set canvas size to match video
+    const updateCanvasSize = () => {
+      canvas.width = video.videoWidth || canvas.clientWidth;
+      canvas.height = video.videoHeight || canvas.clientHeight;
+    };
+
+    // Draw overlay
+    const drawOverlay = () => {
+      if (!ctx || !canvas.width || !canvas.height) return;
+
+      // Clear canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Calculate projection rectangle size
+      const currentHFOV = lensUseWideCamera ? CAMERA_HFOV_WIDE : CAMERA_HFOV_NORMAL;
+      const { widthRatio, heightRatio } = calculateProjectionOverlay(lensThrowRatio, currentHFOV);
+
+      // Calculate rectangle dimensions
+      const rectWidth = canvas.width * widthRatio;
+      const rectHeight = canvas.height * heightRatio;
+      const rectX = (canvas.width - rectWidth) / 2;
+      const rectY = (canvas.height - rectHeight) / 2;
+
+      // Draw semi-transparent blue rectangle
+      ctx.strokeStyle = "rgba(59, 130, 246, 0.8)"; // Blue
+      ctx.lineWidth = 4;
+      ctx.strokeRect(rectX, rectY, rectWidth, rectHeight);
+
+      // Fill with very transparent blue
+      ctx.fillStyle = "rgba(59, 130, 246, 0.1)";
+      ctx.fillRect(rectX, rectY, rectWidth, rectHeight);
+
+      // Check if projection exceeds camera FOV (for auto-switch logic later)
+      if (widthRatio > 1.0 && !lensUseWideCamera) {
+        // Draw warning that wide camera is needed
+        ctx.fillStyle = "rgba(239, 68, 68, 0.9)"; // Red
+        ctx.font = "16px sans-serif";
+        ctx.fillText("⚠ Coverage exceeds view - switch to wide camera", 20, 40);
+      }
+    };
+
+    // Update on video metadata loaded
+    video.addEventListener("loadedmetadata", updateCanvasSize);
+
+    // Animation loop
+    let animationFrameId: number;
+    const animate = () => {
+      drawOverlay();
+      animationFrameId = requestAnimationFrame(animate);
+    };
+    animate();
+
+    // Cleanup
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      video.removeEventListener("loadedmetadata", updateCanvasSize);
+    };
+  }, [lensCameraActive, lensThrowRatio, lensUseWideCamera, CAMERA_HFOV_NORMAL, CAMERA_HFOV_WIDE]);
 
   // Architect scale conversion (inches per foot on drawing)
   // For Imperial: value = inches per foot (e.g., 1/4 means 1/4 inch = 1 foot)
@@ -1506,6 +1697,20 @@ export function ProjectionCalculator() {
     setCadPanOffset({ x: 0, y: 0 });
   }, [cadRotation, cadPdfSize]);
 
+  // Calculate scale-aware viewport scale to prevent memory issues with large PDFs
+  const getViewportScale = (architectScale: string): number => {
+    const scaleMap: { [key: string]: number } = {
+      "1/4": 1.5,   // Small drawings can use higher resolution
+      "3/8": 1.25,  // Medium drawings
+      "1/2": 1.0,   // Larger drawings need lower resolution
+      "3/4": 0.75,  // Very large drawings
+      "1": 0.6,     // Full scale drawings
+      "1-1/2": 0.5,
+      "3": 0.4
+    };
+    return scaleMap[architectScale] || 1.0;
+  };
+
   // Render PDF to canvas when document loads or page changes
   useEffect(() => {
     const renderPdf = async () => {
@@ -1528,7 +1733,26 @@ export function ProjectionCalculator() {
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
 
-        const viewport = page.getViewport({ scale: 1.5 });
+        // Use scale-aware viewport scale based on architectural scale
+        const viewportScale = getViewportScale(cadScale);
+        let viewport = page.getViewport({ scale: viewportScale });
+
+        // Canvas dimension limits to prevent browser crashes
+        const MAX_CANVAS_DIMENSION = 8192; // Safe limit for most browsers
+        const MAX_CANVAS_AREA = 268435456; // ~268 megapixels
+
+        // If dimensions exceed limits, reduce scale and retry
+        if (viewport.width > MAX_CANVAS_DIMENSION ||
+          viewport.height > MAX_CANVAS_DIMENSION ||
+          viewport.width * viewport.height > MAX_CANVAS_AREA) {
+          console.warn(`PDF too large (${viewport.width}x${viewport.height}), reducing scale`);
+          const scaleFactor = Math.min(
+            MAX_CANVAS_DIMENSION / Math.max(viewport.width, viewport.height),
+            Math.sqrt(MAX_CANVAS_AREA / (viewport.width * viewport.height))
+          );
+          viewport = page.getViewport({ scale: viewportScale * scaleFactor * 0.9 });
+          console.log(`Reduced to ${viewport.width}x${viewport.height}`);
+        }
 
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -6085,8 +6309,8 @@ export function ProjectionCalculator() {
               const clickY = e.clientY - containerRect.top;
 
               // Get relative position accounting for pan and zoom
-              const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
-              const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
+              const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
+              const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
 
               // Unrotate coordinates
               const radians = (-cadRotation * Math.PI) / 180;
@@ -6098,6 +6322,11 @@ export function ProjectionCalculator() {
               // Convert to PDF coordinates
               const x = unrotatedX + cadPdfSize.width / 2;
               const y = unrotatedY + cadPdfSize.height / 2;
+
+              // Ignore clicks outside PDF bounds (in outer bounds area)
+              if (x < 0 || x > cadPdfSize.width || y < 0 || y > cadPdfSize.height) {
+                return; // Click is in outer bounds, ignore it
+              }
 
               // Check floor Z handle (in section mode when visible)
               if (cadViewMode === "section" && cadFloorZ && cadFloorZVisible) {
@@ -6163,8 +6392,8 @@ export function ProjectionCalculator() {
                 const clickY = e.clientY - containerRect.top;
 
                 // Get relative position accounting for pan and zoom
-                const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
-                const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
+                const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
+                const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
 
                 // Unrotate coordinates
                 const radians = (-cadRotation * Math.PI) / 180;
@@ -6250,8 +6479,8 @@ export function ProjectionCalculator() {
               const clickY = touch.clientY - containerRect.top;
 
               // Get relative position accounting for pan and zoom
-              const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
-              const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
+              const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
+              const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
 
               // Unrotate coordinates
               const radians = (-cadRotation * Math.PI) / 180;
@@ -6263,6 +6492,11 @@ export function ProjectionCalculator() {
               // Convert to PDF coordinates
               const x = unrotatedX + cadPdfSize.width / 2;
               const y = unrotatedY + cadPdfSize.height / 2;
+
+              // Ignore clicks outside PDF bounds (in outer bounds area)
+              if (x < 0 || x > cadPdfSize.width || y < 0 || y > cadPdfSize.height) {
+                return; // Touch is in outer bounds, ignore it
+              }
 
               // Check floor Z handle (in section mode when visible)
               if (cadViewMode === "section" && cadFloorZ && cadFloorZVisible) {
@@ -6352,8 +6586,8 @@ export function ProjectionCalculator() {
                 const clickY = touch.clientY - containerRect.top;
 
                 // Get relative position accounting for pan and zoom
-                const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
-                const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
+                const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
+                const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
 
                 // Unrotate coordinates
                 const radians = (-cadRotation * Math.PI) / 180;
@@ -6720,6 +6954,7 @@ export function ProjectionCalculator() {
         {activeTab === "projector" && "Throw Distance Calculator"}
         {activeTab === "resolution" && "Surface Resolution Calculator"}
         {activeTab === "aspect" && "Aspect Ratio Estimator"}
+        {activeTab === "lens" && "Lens Calculator"}
       </h2>
 
       {/* Tab Navigation - iOS Tab Bar */}
@@ -6729,6 +6964,7 @@ export function ProjectionCalculator() {
           { id: "projector", label: "Throw", icon: <ThrowIcon className="w-8 h-8" /> },
           { id: "resolution", label: "Surface", icon: <SurfacesIcon className="w-8 h-8" /> },
           { id: "aspect", label: "Aspect", icon: <AspectIcon className="w-8 h-8" /> },
+          ...(ENABLE_LENS_TAB ? [{ id: "lens", label: "Lens", icon: <LensIcon className="w-8 h-8" /> }] : []),
         ]}
         activeTab={activeTab}
         onTabChange={handleTabChange}
@@ -7430,6 +7666,126 @@ export function ProjectionCalculator() {
           >
             Export PDF Report
           </IOSButton>
+        </div>
+      </div>
+
+      {/* Lens Tab Content - Live Camera Viewfinder with Projection Overlay */}
+      <div
+        style={{
+          display: activeTab === "lens" ? "block" : "none",
+          animation: activeTab === "lens" ? `${getSlideDirection("lens")} 0.3s ease-out` : "none",
+        }}
+        className="h-full"
+      >
+        <div className="relative w-full h-full" style={{ backgroundColor: "#000" }}>
+          {/* Camera Video Feed */}
+          <video
+            ref={lensCameraRef}
+            autoPlay
+            playsInline
+            muted
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform: "scaleX(-1)", // Mirror for rear camera
+            }}
+          />
+
+          {/* Overlay Canvas for Projection Rectangle */}
+          <canvas
+            ref={lensCanvasRef}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              pointerEvents: "none",
+            }}
+          />
+
+          {/* Controls Overlay */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: "20px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "90%",
+              maxWidth: "500px",
+              backgroundColor: "rgba(0, 0, 0, 0.7)",
+              backdropFilter: "blur(10px)",
+              borderRadius: "16px",
+              padding: "16px",
+              color: "white",
+            }}
+          >
+            <div className="mb-3">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-semibold">Throw Ratio</span>
+                <span className="text-sm font-mono">{lensThrowRatio.toFixed(2)}:1</span>
+              </div>
+              <input
+                type="range"
+                min="0.8"
+                max="3.0"
+                step="0.1"
+                value={lensThrowRatio}
+                onChange={(e) => setLensThrowRatio(parseFloat(e.target.value))}
+                style={{
+                  width: "100%",
+                  accentColor: "#3b82f6",
+                }}
+              />
+              <div className="flex justify-between text-xs text-gray-400 mt-1">
+                <span>Short (0.8:1)</span>
+                <span>Long (3.0:1)</span>
+              </div>
+            </div>
+
+            <div className="text-xs text-gray-300 text-center">
+              Blue box shows projection coverage at current throw ratio
+            </div>
+          </div>
+
+          {/* Camera not active or error message */}
+          {!lensCameraActive && (
+            <div
+              style={{
+                position: "absolute",
+                top: "50%",
+                left: "50%",
+                transform: "translate(-50%, -50%)",
+                textAlign: "center",
+                color: "white",
+                maxWidth: "90%",
+                padding: "20px",
+              }}
+            >
+              <h2 className="text-xl font-bold mb-4">Lens Preview</h2>
+              {lensCameraError ? (
+                <div>
+                  <p className="text-sm text-red-400 mb-4">⚠ {lensCameraError}</p>
+                  <div className="text-xs text-gray-400 space-y-2">
+                    <p><strong>To use this feature:</strong></p>
+                    <p>• Deploy to a mobile device via Capacitor, OR</p>
+                    <p>• Access via HTTPS (not HTTP), OR</p>
+                    <p>• Use Chrome/Safari on a phone/tablet</p>
+                    <p className="mt-4 pt-4 border-t border-gray-600">
+                      This feature provides a live camera overlay showing<br/>
+                      projection coverage based on throw ratio.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-300">Initializing camera...</p>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
