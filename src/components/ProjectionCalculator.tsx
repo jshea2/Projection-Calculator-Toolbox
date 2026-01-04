@@ -52,7 +52,8 @@ import appIcon from "../assets/app-icon.png";
 // FEATURE FLAGS - Set to false to hide features
 // ============================================
 const ENABLE_CAD_TAB = true; // Set to false to hide CAD tab for release
-const ENABLE_LENS_TAB = true; // Set to false to hide Lens tab during development
+const ENABLE_LENS_TAB = false; // Set to false to hide Lens tab during development
+const ENABLE_ASPECT_LIVE_TAB = true; // New improved aspect ratio tab with live camera
 
 // Custom SVG Icons
 const SurfacesIcon = ({ className }: { className?: string }) => (
@@ -357,21 +358,21 @@ export function ProjectionCalculator() {
 
   // Tab state
   const [activeTab, setActiveTab] = useState<
-    "resolution" | "projector" | "aspect" | "cad" | "lens"
+    "resolution" | "projector" | "aspectLive" | "cad" | "lens"
   >("cad");
   const [previousTab, setPreviousTab] = useState<
-    "resolution" | "projector" | "aspect" | "cad" | "lens"
+    "resolution" | "projector" | "aspectLive" | "cad" | "lens"
   >("cad");
 
   // Tab change handler with direction tracking
-  const handleTabChange = (newTab: "resolution" | "projector" | "aspect" | "cad" | "lens") => {
+  const handleTabChange = (newTab: "resolution" | "projector" | "aspectLive" | "cad" | "lens") => {
     setPreviousTab(activeTab);
     setActiveTab(newTab);
   };
 
   // Helper to get slide direction based on tab order
-  const getSlideDirection = (tab: "resolution" | "projector" | "aspect" | "cad" | "lens") => {
-    const tabOrder = ["cad", "projector", "resolution", "aspect", "lens"];
+  const getSlideDirection = (tab: "resolution" | "projector" | "aspectLive" | "cad" | "lens") => {
+    const tabOrder = ["cad", "projector", "resolution", "aspectLive", "lens"];
     // Use previousTab to determine direction since activeTab has already changed
     const currentIndex = tabOrder.indexOf(previousTab);
     const newIndex = tabOrder.indexOf(tab);
@@ -380,24 +381,34 @@ export function ProjectionCalculator() {
     return direction;
   };
 
-  // Lens Preview: Calculate projection rectangle size based on throw ratio and camera FOV
-  const calculateProjectionOverlay = (throwRatio: number, cameraHFOV: number) => {
-    // At a given distance D:
-    // - Projection width = D / throwRatio
+  // Lens Preview: Calculate projection rectangle size based on throw ratio, distance, and camera FOV
+  const calculateProjectionOverlay = (throwRatio: number, throwDistance: number, cameraHFOV: number, projectionAspect: number) => {
+    // At the specified throw distance D:
+    // - Projection width at wall = D / throwRatio
     // - Camera FOV width at distance D = 2 * D * tan(HFOV/2)
     //
-    // Ratio of projection to camera view:
+    // Ratio of projection to camera view (width):
     // projectionWidth / cameraViewWidth = (D / throwRatio) / (2 * D * tan(HFOV/2))
     //                                    = 1 / (throwRatio * 2 * tan(HFOV/2))
+    //
+    // This ratio is distance-independent, but throw distance is useful for:
+    // 1. Showing the user what physical projection size to expect
+    // 2. Future features like parallax correction if camera != projector position
 
     const hfovRadians = (cameraHFOV * Math.PI) / 180;
     const widthRatio = 1 / (throwRatio * 2 * Math.tan(hfovRadians / 2));
 
-    // Height ratio based on 16:9 aspect ratio
-    // VFOV can be derived from HFOV and aspect ratio
-    const cameraAspect = 16 / 9; // Assume camera is also 16:9
+    // For height: projection height = projection width / projection aspect ratio
+    // We need camera's vertical FOV to calculate height ratio
+    // Assuming camera is 16:9, calculate VFOV from HFOV
+    const cameraAspect = 16 / 9;
     const vfovRadians = 2 * Math.atan(Math.tan(hfovRadians / 2) / cameraAspect);
-    const heightRatio = 1 / (throwRatio * PROJECTION_ASPECT_RATIO * 2 * Math.tan(vfovRadians / 2));
+
+    // Projection height at distance D = projection width / projection aspect
+    // Camera view height at distance D = 2 * D * tan(VFOV/2)
+    const projectionHeight = (1 / throwRatio) / projectionAspect; // D cancels
+    const cameraViewHeight = 2 * Math.tan(vfovRadians / 2); // D cancels
+    const heightRatio = projectionHeight / cameraViewHeight;
 
     return { widthRatio, heightRatio };
   };
@@ -426,9 +437,47 @@ export function ProjectionCalculator() {
       console.log("Requesting camera with constraints:", constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       console.log("Camera stream obtained:", stream);
+      setCurrentStream(stream);
 
       if (lensCameraRef.current) {
         lensCameraRef.current.srcObject = stream;
+
+        // Detect actual camera FOV from device
+        const videoTrack = stream.getVideoTracks()[0];
+        const settings = videoTrack.getSettings() as any;
+
+        // Try to get FOV from camera settings or derive from focal length
+        let detectedFOV = IPHONE_CAMERA_FOV[1.0]; // Default fallback to 1x camera
+
+        // Method 1: Some devices provide horizontal FOV directly
+        if ('horizontalFOV' in settings) {
+          detectedFOV = settings.horizontalFOV;
+          console.log("Camera HFOV from settings:", detectedFOV);
+        }
+        // Method 2: Calculate from focal length (more common)
+        else if (settings.focalLength && settings.width) {
+          // Typical sensor width for phone cameras: ~4.8mm for main, ~3.6mm for wide
+          const sensorWidth = 4.8; // mm (approximate)
+          const focalLength = settings.focalLength; // mm
+          const hfovRadians = 2 * Math.atan(sensorWidth / (2 * focalLength));
+          detectedFOV = (hfovRadians * 180) / Math.PI;
+          console.log(`Camera HFOV calculated: ${detectedFOV.toFixed(1)}° (focal: ${focalLength}mm, sensor: ${sensorWidth}mm)`);
+        }
+        // Method 3: Device model detection (as last resort)
+        else {
+          const userAgent = navigator.userAgent.toLowerCase();
+          if (userAgent.includes('iphone')) {
+            detectedFOV = 48; // iPhone main camera (24mm equivalent, vertical FOV for landscape)
+          } else if (userAgent.includes('pixel')) {
+            detectedFOV = 77; // Pixel phones typical
+          } else if (userAgent.includes('samsung')) {
+            detectedFOV = 78; // Samsung typical
+          }
+          console.log("Camera HFOV from device detection:", detectedFOV);
+        }
+
+        setDetectedCameraFOV(detectedFOV);
+        console.log(`Using camera HFOV: ${detectedFOV.toFixed(1)}°`);
 
         // Add event listeners to debug video loading
         lensCameraRef.current.onloadedmetadata = () => {
@@ -437,6 +486,8 @@ export function ProjectionCalculator() {
             videoHeight: lensCameraRef.current?.videoHeight,
             clientWidth: lensCameraRef.current?.clientWidth,
             clientHeight: lensCameraRef.current?.clientHeight,
+            detectedFOV: detectedFOV.toFixed(1) + "°",
+            cameraSettings: settings,
           });
         };
 
@@ -453,10 +504,10 @@ export function ProjectionCalculator() {
       const errorMsg = error.name === "NotAllowedError"
         ? "Camera permission denied"
         : error.name === "NotFoundError"
-        ? "No camera found"
-        : error.name === "NotReadableError"
-        ? "Camera already in use"
-        : "Camera unavailable - requires HTTPS or mobile device";
+          ? "No camera found"
+          : error.name === "NotReadableError"
+            ? "Camera already in use"
+            : "Camera unavailable - requires HTTPS or mobile device";
       setLensCameraError(errorMsg);
     }
   };
@@ -468,6 +519,119 @@ export function ProjectionCalculator() {
       stream.getTracks().forEach(track => track.stop());
       lensCameraRef.current.srcObject = null;
       setLensCameraActive(false);
+    }
+  };
+
+  // Lens Preview: Switch camera zoom level
+  const switchCameraZoom = async (zoomLevel: number) => {
+    setLensZoomLevel(zoomLevel);
+
+    // Stop current stream
+    if (currentStream) {
+      currentStream.getTracks().forEach(track => track.stop());
+    }
+
+    // Restart camera with new zoom level
+    try {
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          zoom: zoomLevel,
+        } as any,
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      setCurrentStream(stream);
+
+      if (lensCameraRef.current) {
+        lensCameraRef.current.srcObject = stream;
+
+        // Detect FOV for this zoom level
+        const videoTrack = stream.getVideoTracks()[0];
+        const settings = videoTrack.getSettings() as any;
+
+        let detectedFOV = IPHONE_CAMERA_FOV[zoomLevel as keyof typeof IPHONE_CAMERA_FOV] || IPHONE_CAMERA_FOV[1.0];
+
+        if ('horizontalFOV' in settings) {
+          detectedFOV = settings.horizontalFOV;
+        } else if (settings.focalLength && settings.width) {
+          const sensorWidth = 4.8;
+          const focalLength = settings.focalLength;
+          const hfovRadians = 2 * Math.atan(sensorWidth / (2 * focalLength));
+          detectedFOV = (hfovRadians * 180) / Math.PI;
+        }
+
+        setDetectedCameraFOV(detectedFOV);
+        await lensCameraRef.current.play();
+      }
+    } catch (error) {
+      console.error("Error switching camera zoom:", error);
+      // Fallback to basic constraints if zoom not supported
+      startLensCamera();
+    }
+  };
+
+  // Aspect Ratio Live: Start camera
+  const startAspectLiveCamera = async () => {
+    try {
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: aspectLiveFacingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          zoom: aspectLiveZoomLevel !== 1.0 ? aspectLiveZoomLevel : undefined,
+        } as any,
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      if (aspectLiveVideoRef.current) {
+        aspectLiveVideoRef.current.srcObject = stream;
+        aspectLiveStreamRef.current = stream;
+        setAspectLiveCameraActive(true);
+      }
+    } catch (error) {
+      console.error("Error starting Aspect Live camera:", error);
+    }
+  };
+
+  // Aspect Ratio Live: Stop camera
+  const stopAspectLiveCamera = () => {
+    if (aspectLiveStreamRef.current) {
+      aspectLiveStreamRef.current.getTracks().forEach(track => track.stop());
+      aspectLiveStreamRef.current = null;
+    }
+    if (aspectLiveVideoRef.current) {
+      aspectLiveVideoRef.current.srcObject = null;
+    }
+    setAspectLiveCameraActive(false);
+  };
+
+  // Aspect Ratio Live: Toggle camera facing mode
+  const toggleAspectLiveCamera = async () => {
+    stopAspectLiveCamera();
+    setAspectLiveFacingMode(prev => prev === "environment" ? "user" : "environment");
+    // Camera will restart via useEffect
+  };
+
+  // Aspect Ratio Live: Capture photo
+  const captureAspectLivePhoto = () => {
+    if (aspectLiveVideoRef.current) {
+      const canvas = document.createElement("canvas");
+      canvas.width = aspectLiveVideoRef.current.videoWidth;
+      canvas.height = aspectLiveVideoRef.current.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(aspectLiveVideoRef.current, 0, 0);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+        setAspectLivePhoto(dataUrl);
+        setAspectLiveMode("photo");
+        stopAspectLiveCamera();
+      }
     }
   };
 
@@ -510,39 +674,213 @@ export function ProjectionCalculator() {
   >(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [selectedAspectRatio, setSelectedAspectRatio] =
-    useState("16:9");
+    useState("custom");
+
+  // Aspect Ratio Live states
+  const [aspectLiveMode, setAspectLiveMode] = useState<"live" | "photo">("live");
+  const [aspectLiveCameraActive, setAspectLiveCameraActive] = useState(false);
+  const [aspectLiveFacingMode, setAspectLiveFacingMode] = useState<"user" | "environment">("environment");
+  const [aspectLiveZoomLevel, setAspectLiveZoomLevel] = useState<number>(1.0);
+  const [aspectLivePhoto, setAspectLivePhoto] = useState<string | null>(null);
+  const [aspectLiveRect, setAspectLiveRect] = useState({
+    x: 100,
+    y: 100,
+    width: 400,
+    height: 225, // 16:9 default
+  });
+  const [aspectLiveDragging, setAspectLiveDragging] = useState<"move" | "nw" | "ne" | "sw" | "se" | null>(null);
+  const aspectLiveDraggingRef = useRef<"move" | "nw" | "ne" | "sw" | "se" | null>(null);
+  const [aspectLiveDragStart, setAspectLiveDragStart] = useState({ x: 0, y: 0 });
+  const aspectLiveVideoRef = useRef<HTMLVideoElement>(null);
+  const aspectLiveStreamRef = useRef<MediaStream | null>(null);
+  const prevAspectLiveRectRef = useRef({ x: 100, y: 100, width: 400, height: 225 });
+
+  // Region states
+  interface Region {
+    id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+  const [regions, setRegions] = useState<Region[]>([]);
+  const [draggingRegion, setDraggingRegion] = useState<{ id: string; type: "move" | "nw" | "ne" | "sw" | "se" } | null>(null);
+  const draggingRegionRef = useRef<{ id: string; type: "move" | "nw" | "ne" | "sw" | "se" } | null>(null);
+  const [regionDragStart, setRegionDragStart] = useState({ x: 0, y: 0 });
 
   const aspectRatios: { [key: string]: number } = {
     "16:9": 16 / 9,
     "16:10": 16 / 10,
     "4:3": 4 / 3,
     "21:9": 21 / 9,
+    "9:16": 9 / 16,
     "2.39:1": 2.39 / 1,
     "1:1": 1 / 1,
   };
 
+  // Snapping helper function for regions
+  const applySnapping = (region: Region, otherRegions: Region[], snapThreshold = 10) => {
+    let snappedX = region.x;
+    let snappedY = region.y;
+
+    // Get all potential snap points
+    const snapPoints: { x: number[], y: number[] } = { x: [], y: [] };
+
+    // Add main rectangle edges as snap points
+    snapPoints.x.push(aspectLiveRect.x, aspectLiveRect.x + aspectLiveRect.width);
+    snapPoints.y.push(aspectLiveRect.y, aspectLiveRect.y + aspectLiveRect.height);
+
+    // Add other regions' edges as snap points
+    otherRegions.forEach((other) => {
+      if (other.id !== region.id) {
+        // Left and right edges
+        snapPoints.x.push(other.x, other.x + other.width);
+        // Top and bottom edges
+        snapPoints.y.push(other.y, other.y + other.height);
+      }
+    });
+
+    // Check snapping for left edge, right edge, and center
+    const regionRight = region.x + region.width;
+    const regionCenterX = region.x + region.width / 2;
+
+    for (const snapX of snapPoints.x) {
+      // Snap left edge
+      if (Math.abs(region.x - snapX) < snapThreshold) {
+        snappedX = snapX;
+      }
+      // Snap right edge
+      if (Math.abs(regionRight - snapX) < snapThreshold) {
+        snappedX = snapX - region.width;
+      }
+      // Snap center
+      if (Math.abs(regionCenterX - snapX) < snapThreshold) {
+        snappedX = snapX - region.width / 2;
+      }
+    }
+
+    // Check snapping for top edge, bottom edge, and center
+    const regionBottom = region.y + region.height;
+    const regionCenterY = region.y + region.height / 2;
+
+    for (const snapY of snapPoints.y) {
+      // Snap top edge
+      if (Math.abs(region.y - snapY) < snapThreshold) {
+        snappedY = snapY;
+      }
+      // Snap bottom edge
+      if (Math.abs(regionBottom - snapY) < snapThreshold) {
+        snappedY = snapY - region.height;
+      }
+      // Snap center
+      if (Math.abs(regionCenterY - snapY) < snapThreshold) {
+        snappedY = snapY - region.height / 2;
+      }
+    }
+
+    return { ...region, x: snappedX, y: snappedY };
+  };
+
+  // Snapping helper for resize operations
+  const applyResizeSnapping = (region: Region, otherRegions: Region[], snapThreshold = 10) => {
+    let snappedRegion = { ...region };
+
+    // Get all potential snap points
+    const snapPoints: { x: number[], y: number[] } = { x: [], y: [] };
+
+    // Add main rectangle edges as snap points
+    snapPoints.x.push(aspectLiveRect.x, aspectLiveRect.x + aspectLiveRect.width);
+    snapPoints.y.push(aspectLiveRect.y, aspectLiveRect.y + aspectLiveRect.height);
+
+    // Add other regions' edges as snap points
+    otherRegions.forEach((other) => {
+      if (other.id !== region.id) {
+        snapPoints.x.push(other.x, other.x + other.width);
+        snapPoints.y.push(other.y, other.y + other.height);
+      }
+    });
+
+    // Snap left edge (x position)
+    for (const snapX of snapPoints.x) {
+      if (Math.abs(region.x - snapX) < snapThreshold) {
+        const diff = snapX - region.x;
+        snappedRegion.x = snapX;
+        snappedRegion.width = region.width - diff;
+      }
+    }
+
+    // Snap right edge (x + width)
+    const regionRight = snappedRegion.x + snappedRegion.width;
+    for (const snapX of snapPoints.x) {
+      if (Math.abs(regionRight - snapX) < snapThreshold) {
+        snappedRegion.width = snapX - snappedRegion.x;
+      }
+    }
+
+    // Snap top edge (y position)
+    for (const snapY of snapPoints.y) {
+      if (Math.abs(region.y - snapY) < snapThreshold) {
+        const diff = snapY - region.y;
+        snappedRegion.y = snapY;
+        snappedRegion.height = region.height - diff;
+      }
+    }
+
+    // Snap bottom edge (y + height)
+    const regionBottom = snappedRegion.y + snappedRegion.height;
+    for (const snapY of snapPoints.y) {
+      if (Math.abs(regionBottom - snapY) < snapThreshold) {
+        snappedRegion.height = snapY - snappedRegion.y;
+      }
+    }
+
+    return snappedRegion;
+  };
+
   // Lens Preview (Camera Viewfinder) states
-  const [lensThrowRatio, setLensThrowRatio] = useState<number>(1.5); // Default short throw
+  const [lensThrowRatio, setLensThrowRatio] = useState<number>(2.0); // Default medium throw
+  const [lensThrowDistance, setLensThrowDistance] = useState<number>(10); // Default 10 feet
   const [lensCameraActive, setLensCameraActive] = useState(false);
-  const [lensUseWideCamera, setLensUseWideCamera] = useState(false);
+  const [lensZoomLevel, setLensZoomLevel] = useState<number>(1.0); // 0.5x, 1.0x, 2.0x, 3.0x
   const [lensCameraError, setLensCameraError] = useState<string | null>(null);
+  const [detectedCameraFOV, setDetectedCameraFOV] = useState<number | null>(null);
+  const [lensAspectRatio, setLensAspectRatio] = useState<string>("16:9");
+  const [customAspectWidth, setCustomAspectWidth] = useState<string>("16");
+  const [customAspectHeight, setCustomAspectHeight] = useState<string>("9");
+  const [currentStream, setCurrentStream] = useState<MediaStream | null>(null);
+  const [showLensInfo, setShowLensInfo] = useState(false);
   const lensCameraRef = useRef<HTMLVideoElement>(null);
   const lensCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Camera field of view constants (approximate for common phone cameras)
-  const CAMERA_HFOV_NORMAL = 68; // degrees, typical 1x camera
-  const CAMERA_HFOV_WIDE = 120; // degrees, typical 0.5x ultra-wide camera
-  const PROJECTION_ASPECT_RATIO = 16 / 9; // Standard projector aspect
+  // iPhone 15 Pro camera FOV by zoom level (VERTICAL FOV in degrees for landscape orientation)
+  // Based on: 0.5x=13mm, 1x=24mm, 2x=48mm, 3x=77mm (35mm equivalent)
+  // Calculated from horizontal FOV assuming 16:9 aspect ratio
+  const IPHONE_CAMERA_FOV = {
+    0.5: 75,   // Ultra-wide camera (13mm equivalent, HFOV ~109° -> VFOV ~75°)
+    1.0: 48,   // Main camera (24mm equivalent, HFOV ~73.7° -> VFOV ~48°)
+    2.0: 25.5, // 2x zoom (48mm equivalent, HFOV ~41° -> VFOV ~25.5°)
+    3.0: 16,   // 3x telephoto (77mm equivalent, HFOV ~26° -> VFOV ~16°)
+  };
+
+  // Get projection aspect ratio based on selected aspect
+  const getProjectionAspectRatio = (): number => {
+    if (lensAspectRatio === "custom") {
+      const width = parseFloat(customAspectWidth) || 16;
+      const height = parseFloat(customAspectHeight) || 9;
+      return width / height;
+    }
+    return aspectRatios[lensAspectRatio] || 16 / 9;
+  };
 
   // Lock orientation based on active tab - updated to include lens landscape mode
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
-      if (activeTab === "aspect") {
-        // Allow all orientations on Aspect Ratio tab
-        ScreenOrientation.unlock();
-      } else if (activeTab === "lens") {
+      if (activeTab === "lens") {
         // Lock to landscape on Lens Preview tab
         ScreenOrientation.lock({ orientation: "landscape" });
+      } else if (activeTab === "aspectLive") {
+        // Allow all orientations on Aspect Live tab
+        ScreenOrientation.unlock();
       } else {
         // Lock to portrait on all other tabs
         ScreenOrientation.lock({ orientation: "portrait" });
@@ -565,6 +903,144 @@ export function ProjectionCalculator() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
+  // Start/stop camera when entering/leaving Aspect Live tab or changing mode/facing/zoom
+  useEffect(() => {
+    if (activeTab === "aspectLive" && aspectLiveMode === "live") {
+      startAspectLiveCamera();
+    } else {
+      stopAspectLiveCamera();
+    }
+
+    return () => {
+      stopAspectLiveCamera();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, aspectLiveMode, aspectLiveFacingMode, aspectLiveZoomLevel]);
+
+  // Update orientation for Aspect Live tab
+  useEffect(() => {
+    if (Capacitor.isNativePlatform() && activeTab === "aspectLive") {
+      ScreenOrientation.unlock();
+    }
+  }, [activeTab]);
+
+  // Constrain rectangle to stay on screen when window resizes or orientation changes
+  useEffect(() => {
+    const resetScrollAndConstrain = () => {
+      // iOS Capacitor: aggressively reset scroll on ALL scrollable elements
+      const resetScroll = () => {
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior });
+        document.body.scrollTop = 0;
+        document.documentElement.scrollTop = 0;
+        // Also try scrolling the app container
+        const appContainer = document.getElementById('root');
+        if (appContainer) appContainer.scrollTop = 0;
+      };
+
+      resetScroll();
+
+      const viewWidth = window.innerWidth;
+      const viewHeight = window.innerHeight;
+
+      setAspectLiveRect(prev => {
+        let newRect = { ...prev };
+
+        // Ensure width/height don't exceed viewport
+        if (newRect.width > viewWidth) newRect.width = viewWidth - 20;
+        if (newRect.height > viewHeight) newRect.height = viewHeight - 20;
+
+        // Ensure rectangle stays within bounds
+        if (newRect.x < 0) newRect.x = 0;
+        if (newRect.y < 0) newRect.y = 0;
+        if (newRect.x + newRect.width > viewWidth) newRect.x = viewWidth - newRect.width;
+        if (newRect.y + newRect.height > viewHeight) newRect.y = viewHeight - newRect.height;
+
+        return newRect;
+      });
+
+      // Reset scroll again after state update
+      setTimeout(resetScroll, 0);
+    };
+
+    // iOS-specific: prevent touchmove on document to stop scroll
+    const preventScroll = (e: TouchEvent) => {
+      if (activeTab === "aspectLive") {
+        e.preventDefault();
+      }
+    };
+
+    // Handle orientation change with multiple resets
+    const handleOrientationChange = () => {
+      // Reset immediately
+      resetScrollAndConstrain();
+      // Reset after layout settles
+      setTimeout(resetScrollAndConstrain, 50);
+      setTimeout(resetScrollAndConstrain, 150);
+      setTimeout(resetScrollAndConstrain, 300);
+    };
+
+    window.addEventListener('resize', resetScrollAndConstrain);
+    window.addEventListener('orientationchange', handleOrientationChange);
+
+    // Lock body scroll when Aspect Live tab is active
+    if (activeTab === "aspectLive") {
+      // iOS: Set styles for scroll lock
+      document.documentElement.style.overflow = 'hidden';
+      document.documentElement.style.position = 'fixed';
+      document.documentElement.style.width = '100%';
+      document.documentElement.style.height = '100%';
+      document.body.style.overflow = 'hidden';
+      document.body.style.position = 'fixed';
+      document.body.style.width = '100%';
+      document.body.style.height = '100%';
+
+      // iOS: prevent touchmove at document level
+      document.addEventListener('touchmove', preventScroll, { passive: false });
+
+      // Initial reset
+      resetScrollAndConstrain();
+      setTimeout(resetScrollAndConstrain, 100);
+    }
+
+    return () => {
+      window.removeEventListener('resize', resetScrollAndConstrain);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+      document.removeEventListener('touchmove', preventScroll);
+      // Restore scroll when leaving tab - only remove specific properties
+      if (activeTab === "aspectLive") {
+        document.documentElement.style.overflow = '';
+        document.documentElement.style.position = '';
+        document.documentElement.style.width = '';
+        document.documentElement.style.height = '';
+        document.body.style.overflow = '';
+        document.body.style.position = '';
+        document.body.style.width = '';
+        document.body.style.height = '';
+      }
+    };
+  }, [activeTab]);
+
+  // Move regions with main rectangle when it moves
+  useEffect(() => {
+    const prev = prevAspectLiveRectRef.current;
+    const deltaX = aspectLiveRect.x - prev.x;
+    const deltaY = aspectLiveRect.y - prev.y;
+
+    // Only update regions if main rectangle actually moved
+    if ((deltaX !== 0 || deltaY !== 0) && regions.length > 0) {
+      setRegions((prevRegions) =>
+        prevRegions.map((region) => ({
+          ...region,
+          x: region.x + deltaX,
+          y: region.y + deltaY,
+        }))
+      );
+    }
+
+    // Update the ref to current position
+    prevAspectLiveRectRef.current = { ...aspectLiveRect };
+  }, [aspectLiveRect.x, aspectLiveRect.y]);
+
   // Draw projection overlay on canvas
   useEffect(() => {
     if (!lensCameraActive || !lensCanvasRef.current || !lensCameraRef.current) {
@@ -576,11 +1052,18 @@ export function ProjectionCalculator() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Set canvas size to match video
+    // Set canvas size to match its display size (not video size)
     const updateCanvasSize = () => {
-      canvas.width = video.videoWidth || canvas.clientWidth;
-      canvas.height = video.videoHeight || canvas.clientHeight;
+      // Use the canvas display dimensions to prevent stretching/warping
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
     };
+
+    // Initialize canvas size immediately
+    updateCanvasSize();
+
+    // Update canvas size when window resizes
+    window.addEventListener('resize', updateCanvasSize);
 
     // Draw overlay
     const drawOverlay = () => {
@@ -589,32 +1072,61 @@ export function ProjectionCalculator() {
       // Clear canvas
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Calculate projection rectangle size
-      const currentHFOV = lensUseWideCamera ? CAMERA_HFOV_WIDE : CAMERA_HFOV_NORMAL;
-      const { widthRatio, heightRatio } = calculateProjectionOverlay(lensThrowRatio, currentHFOV);
+      // Calculate projection rectangle size using detected FOV or zoom-based FOV
+      const baseFOV = detectedCameraFOV || IPHONE_CAMERA_FOV[lensZoomLevel as keyof typeof IPHONE_CAMERA_FOV] || IPHONE_CAMERA_FOV[1.0];
+      const projectionAspect = getProjectionAspectRatio();
 
-      // Calculate rectangle dimensions
+      // iPhone cameras are portrait-oriented. When the VIDEO is in landscape mode,
+      // the baseFOV is actually the vertical FOV. We need to calculate the horizontal FOV.
+      // Use VIDEO dimensions, not canvas dimensions (canvas can be resized but video aspect is fixed)
+      const videoIsLandscape = video.videoWidth > video.videoHeight;
+      let currentHFOV;
+
+      if (videoIsLandscape) {
+        // Video is landscape - baseFOV is the vertical FOV, calculate horizontal
+        // Using: HFOV = 2 * atan(tan(VFOV/2) * aspect_ratio)
+        const vfovRadians = (baseFOV * Math.PI) / 180;
+        const videoAspect = video.videoWidth / video.videoHeight;
+        const hfovRadians = 2 * Math.atan(Math.tan(vfovRadians / 2) * videoAspect);
+        currentHFOV = (hfovRadians * 180) / Math.PI;
+      } else {
+        // Video is portrait - baseFOV is already the horizontal FOV
+        currentHFOV = baseFOV;
+      }
+
+      const { widthRatio } = calculateProjectionOverlay(lensThrowRatio, lensThrowDistance, currentHFOV, projectionAspect);
+
+      // Calculate rectangle width as a fraction of canvas width (based on FOV and throw ratio)
+      // Height is calculated to maintain the correct aspect ratio
       const rectWidth = canvas.width * widthRatio;
-      const rectHeight = canvas.height * heightRatio;
+      const rectHeight = rectWidth / projectionAspect;
+
+      // Debug logging
+      console.log('Drawing:', {
+        videoSize: `${video.videoWidth}x${video.videoHeight}`,
+        videoAspect: (video.videoWidth / video.videoHeight).toFixed(2),
+        canvasSize: `${canvas.width}x${canvas.height}`,
+        baseFOV,
+        currentHFOV: currentHFOV.toFixed(2),
+        throwRatio: lensThrowRatio,
+        projectionAspect: projectionAspect.toFixed(2),
+        widthRatio: widthRatio.toFixed(4),
+        rectSize: `${rectWidth.toFixed(0)}x${rectHeight.toFixed(0)}`,
+        rectAsPercent: `${(widthRatio * 100).toFixed(1)}% of canvas width`,
+        calculatedAspect: (rectWidth / rectHeight).toFixed(2)
+      });
+
       const rectX = (canvas.width - rectWidth) / 2;
       const rectY = (canvas.height - rectHeight) / 2;
 
-      // Draw semi-transparent blue rectangle
-      ctx.strokeStyle = "rgba(59, 130, 246, 0.8)"; // Blue
-      ctx.lineWidth = 4;
+      // Draw thin blue border
+      ctx.strokeStyle = "rgba(59, 130, 246, 0.9)"; // Blue
+      ctx.lineWidth = 2;
       ctx.strokeRect(rectX, rectY, rectWidth, rectHeight);
 
-      // Fill with very transparent blue
-      ctx.fillStyle = "rgba(59, 130, 246, 0.1)";
+      // Fill with less transparent blue
+      ctx.fillStyle = "rgba(59, 130, 246, 0.25)";
       ctx.fillRect(rectX, rectY, rectWidth, rectHeight);
-
-      // Check if projection exceeds camera FOV (for auto-switch logic later)
-      if (widthRatio > 1.0 && !lensUseWideCamera) {
-        // Draw warning that wide camera is needed
-        ctx.fillStyle = "rgba(239, 68, 68, 0.9)"; // Red
-        ctx.font = "16px sans-serif";
-        ctx.fillText("⚠ Coverage exceeds view - switch to wide camera", 20, 40);
-      }
     };
 
     // Update on video metadata loaded
@@ -632,8 +1144,9 @@ export function ProjectionCalculator() {
     return () => {
       cancelAnimationFrame(animationFrameId);
       video.removeEventListener("loadedmetadata", updateCanvasSize);
+      window.removeEventListener('resize', updateCanvasSize);
     };
-  }, [lensCameraActive, lensThrowRatio, lensUseWideCamera, CAMERA_HFOV_NORMAL, CAMERA_HFOV_WIDE]);
+  }, [lensCameraActive, lensThrowRatio, lensThrowDistance, lensZoomLevel, detectedCameraFOV, lensAspectRatio, customAspectWidth, customAspectHeight]);
 
   // Architect scale conversion (inches per foot on drawing)
   // For Imperial: value = inches per foot (e.g., 1/4 means 1/4 inch = 1 foot)
@@ -775,6 +1288,15 @@ export function ProjectionCalculator() {
   const [cadAspectRatio, setCadAspectRatio] = useState<"16:9" | "16:10" | "4:3">("16:9");
   const [cadFullscreen, setCadFullscreen] = useState<boolean>(false); // Fullscreen mode
   const [cadFloorZ, setCadFloorZ] = useState<{ x: number; y: number } | null>(null); // Floor Z reference position in PDF coords
+
+  // Unlock orientation when CAD fullscreen mode is active
+  useEffect(() => {
+    if (Capacitor.isNativePlatform() && cadFullscreen) {
+      ScreenOrientation.unlock();
+    } else if (Capacitor.isNativePlatform() && !cadFullscreen && activeTab === "cad") {
+      ScreenOrientation.lock({ orientation: "portrait" });
+    }
+  }, [cadFullscreen, activeTab]);
   const [cadFloorZVisible, setCadFloorZVisible] = useState<boolean>(false); // Whether to show the Floor Z handle
 
   // Helper to get selected projector
@@ -4802,7 +5324,9 @@ export function ProjectionCalculator() {
 
   // Export page - Draw test pattern (simplified version for export)
   useEffect(() => {
-    if (activeTab !== "export") return;
+    // Disabled: export tab doesn't exist
+    if (true) return;
+    // if (activeTab !== "export") return;
     const canvas = exportTestPatternRef.current;
     if (!canvas) return;
 
@@ -4990,7 +5514,9 @@ export function ProjectionCalculator() {
 
   // Export page - Capture both diagram views from the hidden projector canvas
   useEffect(() => {
-    if (activeTab !== "export") return;
+    // Disabled: export tab doesn't exist
+    if (true) return;
+    // if (activeTab !== "export") return;
 
     const captureViews = async () => {
       const sourceCanvas = projectorCanvasRef.current;
@@ -5103,7 +5629,9 @@ export function ProjectionCalculator() {
 
   // Export page - Copy difference viewer from hidden resolution canvas
   useEffect(() => {
-    if (activeTab !== "export") return;
+    // Disabled: export tab doesn't exist
+    if (true) return;
+    // if (activeTab !== "export") return;
 
     const timer = setTimeout(() => {
       const canvas = exportDifferenceRef.current;
@@ -6195,111 +6723,127 @@ export function ProjectionCalculator() {
   // Fullscreen page view - completely separate from main content
   if (cadFullscreen) {
     return (
-      <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, backgroundColor: darkMode ? "#0f172a" : "#f1f5f9", display: "flex", flexDirection: "column" }}>
-        {/* Fullscreen Header */}
-        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", backgroundColor: "#1e293b" }}>
-          <h2 className="text-white font-medium">CAD Viewport</h2>
-          <IOSButton
-            variant="filled"
-            color="red"
-            onClick={() => setCadFullscreen(false)}
-            icon={<Minimize2 className="w-4 h-4" />}
-          >
-            Exit Fullscreen
-          </IOSButton>
-        </div>
-
+      <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, backgroundColor: darkMode ? "#0f172a" : "#f1f5f9" }}>
         {/* Fullscreen Viewport */}
-        <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-          {/* Floating Toolbar */}
-          <div style={{ position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)", zIndex: 20, display: "flex", alignItems: "center", gap: 8, backgroundColor: darkMode ? "rgba(30,41,59,0.95)" : "rgba(255,255,255,0.9)", backdropFilter: "blur(4px)", borderRadius: 9999, padding: "8px 16px", boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)" }}>
-            <button
-              onClick={() => setCadZoom((z: number) => Math.max(cadMinZoom, z - 0.1))}
-              className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
-            >
-              <ZoomOut className="w-5 h-5" />
-            </button>
-            <span className={`text-sm min-w-[50px] text-center ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{(cadZoom * 100).toFixed(0)}%</span>
-            <button
-              onClick={() => setCadZoom((z: number) => Math.min(4, z + 0.1))}
-              className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
-            >
-              <ZoomIn className="w-5 h-5" />
-            </button>
-            <button
-              onClick={() => {
-                // Calculate fit zoom for fullscreen viewport
-                const viewportWidth = window.innerWidth;
-                const viewportHeight = window.innerHeight - 120; // subtract header and toolbar
-                const isRotated = cadRotation === 90 || cadRotation === 270;
-                const effectivePdfWidth = isRotated ? cadPdfSize.height : cadPdfSize.width;
-                const effectivePdfHeight = isRotated ? cadPdfSize.width : cadPdfSize.height;
-                const fitZoom = Math.min(viewportWidth / effectivePdfWidth, viewportHeight / effectivePdfHeight);
-                setCadZoom(fitZoom > 0 ? fitZoom : 1);
-                setCadPanOffset({ x: 0, y: 0 });
-              }}
-              className={`px-3 py-2 text-sm rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
-            >
-              Fit
-            </button>
-            <div className={`border-l h-6 mx-1 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
-            <button
-              onClick={() => setCadRotation((r: number) => (r + 90) % 360)}
-              className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
-            >
-              <RotateCw className="w-5 h-5" />
-            </button>
-            <button
-              onClick={() => { setCadPanMode(!cadPanMode); if (!cadPanMode) setCadLineMode(false); }}
-              className={`p-2 rounded-full transition-colors ${cadPanMode
-                ? "bg-blue-600 text-white hover:bg-blue-700"
-                : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
-                }`}
-            >
-              <Hand className="w-5 h-5" />
-            </button>
-            <button
-              onClick={() => { setCadLineMode(!cadLineMode); if (!cadLineMode) setCadPanMode(false); }}
-              className={`p-2 rounded-full transition-colors ${cadLineMode
-                ? "bg-blue-600 text-white hover:bg-blue-700"
-                : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
-                }`}
-            >
-              <Ruler className="w-5 h-5" />
-            </button>
-            {/* Floor Z button in fullscreen - only in section mode */}
-            {cadViewMode === "section" && (
+        <div style={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
+          {/* Top Toolbar with Close Button */}
+          <div style={{
+            position: "absolute",
+            top: "calc(env(safe-area-inset-top, 0px) + 8px)",
+            left: "calc(env(safe-area-inset-left, 0px) + 8px)",
+            right: "calc(env(safe-area-inset-right, 0px) + 8px)",
+            zIndex: 20,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+          }}>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              backgroundColor: darkMode ? "rgba(30,41,59,0.95)" : "rgba(255,255,255,0.9)",
+              backdropFilter: "blur(4px)",
+              borderRadius: 9999,
+              padding: "8px 16px",
+              boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)"
+            }}>
+              <button
+                onClick={() => setCadZoom((z: number) => Math.max(cadMinZoom, z - 0.1))}
+                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+              >
+                <ZoomOut className="w-5 h-5" />
+              </button>
+              <span className={`text-sm min-w-[50px] text-center ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{(cadZoom * 100).toFixed(0)}%</span>
+              <button
+                onClick={() => setCadZoom((z: number) => Math.min(4, z + 0.1))}
+                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+              >
+                <ZoomIn className="w-5 h-5" />
+              </button>
               <button
                 onClick={() => {
-                  if (!cadFloorZVisible) {
-                    if (!cadFloorZ) {
-                      setCadFloorZ({ x: cadPdfSize.width / 2, y: cadPdfSize.height * 0.8 });
-                    }
-                    setCadFloorZVisible(true);
-                  } else {
-                    setCadFloorZVisible(false);
-                  }
+                  // Calculate fit zoom for fullscreen viewport
+                  const viewportWidth = window.innerWidth;
+                  const viewportHeight = window.innerHeight - 120; // subtract header and toolbar
+                  const isRotated = cadRotation === 90 || cadRotation === 270;
+                  const effectivePdfWidth = isRotated ? cadPdfSize.height : cadPdfSize.width;
+                  const effectivePdfHeight = isRotated ? cadPdfSize.width : cadPdfSize.height;
+                  const fitZoom = Math.min(viewportWidth / effectivePdfWidth, viewportHeight / effectivePdfHeight);
+                  setCadZoom(fitZoom > 0 ? fitZoom : 1);
+                  setCadPanOffset({ x: 0, y: 0 });
                 }}
-                className={`p-2 rounded-full transition-colors ${cadFloorZVisible
-                  ? "bg-purple-600 text-white hover:bg-purple-700"
+                className={`px-3 py-2 text-sm rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+              >
+                Fit
+              </button>
+              <div className={`border-l h-6 mx-1 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
+              <button
+                onClick={() => setCadRotation((r: number) => (r + 90) % 360)}
+                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+              >
+                <RotateCw className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => { setCadPanMode(!cadPanMode); if (!cadPanMode) setCadLineMode(false); }}
+                className={`p-2 rounded-full transition-colors ${cadPanMode
+                  ? "bg-blue-600 text-white hover:bg-blue-700"
                   : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
                   }`}
-                title="Toggle floor reference marker"
               >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  {/* Vertical line */}
-                  <line x1="12" y1="3" x2="12" y2="21" />
-                  {/* Top horizontal line */}
-                  <line x1="8" y1="3" x2="16" y2="3" />
-                  {/* Bottom horizontal line */}
-                  <line x1="8" y1="21" x2="16" y2="21" />
-                  {/* Top arrow head (pointing up) */}
-                  <polyline points="9,7 12,3 15,7" />
-                  {/* Bottom arrow head (pointing down) */}
-                  <polyline points="9,17 12,21 15,17" />
-                </svg>
+                <Hand className="w-5 h-5" />
               </button>
-            )}
+              <button
+                onClick={() => { setCadLineMode(!cadLineMode); if (!cadLineMode) setCadPanMode(false); }}
+                className={`p-2 rounded-full transition-colors ${cadLineMode
+                  ? "bg-blue-600 text-white hover:bg-blue-700"
+                  : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
+                  }`}
+              >
+                <Ruler className="w-5 h-5" />
+              </button>
+              {/* Floor Z button in fullscreen - only in section mode */}
+              {cadViewMode === "section" && (
+                <button
+                  onClick={() => {
+                    if (!cadFloorZVisible) {
+                      if (!cadFloorZ) {
+                        setCadFloorZ({ x: cadPdfSize.width / 2, y: cadPdfSize.height * 0.8 });
+                      }
+                      setCadFloorZVisible(true);
+                    } else {
+                      setCadFloorZVisible(false);
+                    }
+                  }}
+                  className={`p-2 rounded-full transition-colors ${cadFloorZVisible
+                    ? "bg-purple-600 text-white hover:bg-purple-700"
+                    : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
+                    }`}
+                  title="Toggle floor reference marker"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    {/* Vertical line */}
+                    <line x1="12" y1="3" x2="12" y2="21" />
+                    {/* Top horizontal line */}
+                    <line x1="8" y1="3" x2="16" y2="3" />
+                    {/* Bottom horizontal line */}
+                    <line x1="8" y1="21" x2="16" y2="21" />
+                    {/* Top arrow head (pointing up) */}
+                    <polyline points="9,7 12,3 15,7" />
+                    {/* Bottom arrow head (pointing down) */}
+                    <polyline points="9,17 12,21 15,17" />
+                  </svg>
+                </button>
+              )}
+              {/* Close Button */}
+              <div className={`border-l h-6 mx-1 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
+              <button
+                onClick={() => setCadFullscreen(false)}
+                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Canvas Container - handles events for the entire viewport */}
@@ -6456,6 +7000,7 @@ export function ProjectionCalculator() {
               setCadIsPanning(false);
             }}
             onTouchStart={(e: React.TouchEvent<HTMLDivElement>) => {
+              e.preventDefault();
               // Two-finger pinch-to-zoom
               if (e.touches.length === 2) {
                 const touch1 = e.touches[0];
@@ -6556,6 +7101,7 @@ export function ProjectionCalculator() {
               }
             }}
             onTouchMove={(e: React.TouchEvent<HTMLDivElement>) => {
+              e.preventDefault();
               // Two-finger pinch-to-zoom and pan
               if (e.touches.length === 2 && cadPinchStartDist !== null) {
                 const touch1 = e.touches[0];
@@ -6964,7 +7510,7 @@ export function ProjectionCalculator() {
         {activeTab === "cad" && "Layout Planner"}
         {activeTab === "projector" && "Throw Distance Calculator"}
         {activeTab === "resolution" && "Surface Resolution Calculator"}
-        {activeTab === "aspect" && "Aspect Ratio Estimator"}
+        {activeTab === "aspectLive" && "Aspect Ratio"}
         {activeTab === "lens" && "Lens Calculator"}
       </h2>
 
@@ -6974,7 +7520,7 @@ export function ProjectionCalculator() {
           ...(ENABLE_CAD_TAB ? [{ id: "cad", label: "Layout", icon: <CADIcon className="w-8 h-8" /> }] : []),
           { id: "projector", label: "Throw", icon: <ThrowIcon className="w-8 h-8" /> },
           { id: "resolution", label: "Surface", icon: <SurfacesIcon className="w-8 h-8" /> },
-          { id: "aspect", label: "Aspect", icon: <AspectIcon className="w-8 h-8" /> },
+          ...(ENABLE_ASPECT_LIVE_TAB ? [{ id: "aspectLive", label: "Aspect", icon: <AspectIcon className="w-8 h-8" /> }] : []),
           ...(ENABLE_LENS_TAB ? [{ id: "lens", label: "Lens", icon: <LensIcon className="w-8 h-8" /> }] : []),
         ]}
         activeTab={activeTab}
@@ -7523,163 +8069,6 @@ export function ProjectionCalculator() {
         </>
       </div>
 
-      {/* Aspect Ratio Estimator Tab Content */}
-      <div
-        style={{
-          display: activeTab === "aspect" ? "block" : "none",
-          animation: activeTab === "aspect" ? `${getSlideDirection("aspect")} 0.3s ease-out` : "none",
-        }}
-        className="h-full"
-      >
-        <div className="flex items-center justify-end mb-4">
-          {estimatorImage && (
-            <button
-              onClick={clearEstimatorImage}
-              className="text-slate-500 hover:text-slate-700 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
-        </div>
-        <p className={`text-sm mb-4 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
-          Upload a photo or take a picture of your
-          projection surface, then align the rectangle to
-          match the surface edges to estimate the aspect
-          ratio.
-        </p>
-
-        {!estimatorImage && (
-          <div className="space-y-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              onChange={handleImageUpload}
-              className="hidden"
-            />
-            <IOSButton
-              variant="filled"
-              fullWidth
-              onClick={() => fileInputRef.current?.click()}
-              icon={<Upload className="w-5 h-5" />}
-            >
-              Upload Photo of Projection Surface
-            </IOSButton>
-            <p className="text-slate-500 text-xs text-center">
-              Upload a photo from your device's camera or
-              gallery
-            </p>
-          </div>
-        )}
-
-        {estimatorImage && (
-          <div className="space-y-4 h-full">
-            <div className="bg-slate-800 rounded-lg p-2 sm:p-4">
-              <canvas
-                ref={estimatorCanvasRef}
-                className="w-full cursor-crosshair touch-none"
-                style={{ touchAction: "none" }}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onMouseLeave={handleMouseUp}
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onTouchEnd={handleTouchEnd}
-              />
-            </div>
-            <div className="bg-blue-50 rounded-lg p-4">
-              <p className="text-blue-800 text-sm mb-3">
-                <strong>Instructions:</strong> Drag the
-                yellow + corners to align with your
-                projection surface edges. A magnified
-                circular view will appear to help you
-                position precisely.
-              </p>
-
-              <div className="mb-3 space-y-2">
-                <div className="flex gap-2">
-                  <IOSSelect
-                    value={selectedAspectRatio}
-                    onChange={(e) =>
-                      setSelectedAspectRatio(e.target.value)
-                    }
-                    options={[
-                      { value: "16:9", label: "16:9 (Widescreen)" },
-                      { value: "16:10", label: "16:10 (Common Projector)" },
-                      { value: "4:3", label: "4:3 (Classic)" },
-                      { value: "21:9", label: "21:9 (Ultrawide)" },
-                      { value: "2.39:1", label: "2.39:1 (Cinematic)" },
-                      { value: "1:1", label: "1:1 (Square)" },
-                    ]}
-                    darkMode={darkMode}
-                    className="flex-1"
-                  />
-                  <IOSButton
-                    variant={showReferenceRect ? "filled" : "tinted"}
-                    onClick={() =>
-                      setShowReferenceRect(
-                        !showReferenceRect,
-                      )
-                    }
-                  >
-                    {showReferenceRect ? "Hide" : "Show"}
-                  </IOSButton>
-                </div>
-                {showReferenceRect && (
-                  <p className="text-blue-700 text-xs">
-                    Drag the blue rectangle to move it, or
-                    drag the bottom-right corner to resize
-                    it.
-                  </p>
-                )}
-              </div>
-
-              <div className="flex gap-2">
-                <IOSButton
-                  variant="filled"
-                  className="flex-1"
-                  onClick={applyEstimatedAspectRatio}
-                >
-                  Apply Aspect Ratio to Measurements
-                </IOSButton>
-                <IOSButton
-                  variant="gray"
-                  onClick={() => {
-                    setEstimatorImage(null);
-                    setAspectRatioApplied(false);
-                    // Reset corners to default
-                    setRectangleCorners({
-                      topLeft: { x: 100, y: 100 },
-                      topRight: { x: 400, y: 100 },
-                      bottomRight: { x: 400, y: 300 },
-                      bottomLeft: { x: 100, y: 300 },
-                    });
-                  }}
-                  icon={<X className="w-5 h-5" />}
-                >
-                  Retake
-                </IOSButton>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Export PDF Button */}
-        <div className="mt-6">
-          <IOSButton
-            variant="filled"
-            color="green"
-            fullWidth
-            darkMode={darkMode}
-            onClick={generateAspectPDF}
-            icon={<Download className="w-4 h-4" />}
-          >
-            Export PDF Report
-          </IOSButton>
-        </div>
-      </div>
-
       {/* Lens Tab Content - Live Camera Viewfinder with Projection Overlay */}
       <div
         style={{
@@ -7690,10 +8079,15 @@ export function ProjectionCalculator() {
           position: "fixed",
           top: 0,
           left: 0,
-          zIndex: 1,
+          zIndex: 10000,
         }}
       >
-        <div className="relative w-full h-full" style={{ backgroundColor: "#000" }}>
+        <div style={{
+          position: "relative",
+          width: "100%",
+          height: "100vh",
+          backgroundColor: "#000"
+        }}>
           {/* Camera Video Feed */}
           <video
             ref={lensCameraRef}
@@ -7704,10 +8098,9 @@ export function ProjectionCalculator() {
               position: "absolute",
               top: 0,
               left: 0,
-              width: "100%",
-              height: "100%",
+              width: "100vw",
+              height: "100vh",
               objectFit: "cover",
-              transform: "scaleX(-1)", // Mirror for rear camera
             }}
           />
 
@@ -7718,53 +8111,291 @@ export function ProjectionCalculator() {
               position: "absolute",
               top: 0,
               left: 0,
-              width: "100%",
-              height: "100%",
+              width: "100vw",
+              height: "100vh",
               pointerEvents: "none",
             }}
           />
 
-          {/* Controls Overlay */}
+          {/* Close Button (X) - Top Right */}
+          <button
+            onClick={() => setActiveTab(previousTab)}
+            style={{
+              position: "absolute",
+              top: "20px",
+              right: "20px",
+              width: "44px",
+              height: "44px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(0, 0, 0, 0.6)",
+              backdropFilter: "blur(10px)",
+              border: "none",
+              color: "white",
+              fontSize: "24px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              zIndex: 10,
+            }}
+          >
+            ×
+          </button>
+
+          {/* Info Button - Top Right (next to close) */}
+          <button
+            onClick={() => setShowLensInfo(true)}
+            style={{
+              position: "absolute",
+              top: "20px",
+              right: "76px",
+              width: "44px",
+              height: "44px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(0, 0, 0, 0.6)",
+              backdropFilter: "blur(10px)",
+              border: "none",
+              color: "white",
+              fontSize: "20px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              zIndex: 10,
+              fontWeight: "bold",
+            }}
+          >
+            i
+          </button>
+
+          {/* Camera Zoom Buttons - Top Left */}
           <div
             style={{
               position: "absolute",
-              bottom: "20px",
-              left: "50%",
-              transform: "translateX(-50%)",
-              width: "90%",
-              maxWidth: "500px",
-              backgroundColor: "rgba(0, 0, 0, 0.7)",
-              backdropFilter: "blur(10px)",
-              borderRadius: "16px",
-              padding: "16px",
-              color: "white",
+              top: "20px",
+              left: "20px",
+              display: "flex",
+              gap: "8px",
+              zIndex: 10,
             }}
           >
-            <div className="mb-3">
-              <div className="flex justify-between items-center mb-2">
-                <span className="text-sm font-semibold">Throw Ratio</span>
-                <span className="text-sm font-mono">{lensThrowRatio.toFixed(2)}:1</span>
+            {[0.5, 1.0, 2.0, 3.0].map((zoom) => (
+              <button
+                key={zoom}
+                onClick={() => switchCameraZoom(zoom)}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: "20px",
+                  backgroundColor: lensZoomLevel === zoom
+                    ? "rgba(59, 130, 246, 0.9)"
+                    : "rgba(0, 0, 0, 0.6)",
+                  backdropFilter: "blur(10px)",
+                  border: lensZoomLevel === zoom
+                    ? "2px solid rgba(59, 130, 246, 1)"
+                    : "1px solid rgba(255, 255, 255, 0.2)",
+                  color: "white",
+                  fontSize: "13px",
+                  fontWeight: lensZoomLevel === zoom ? "600" : "500",
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                {zoom}×
+              </button>
+            ))}
+          </div>
+
+          {/* Aspect Ratio Dropdown - Bottom Left */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: "30px",
+              left: "20px",
+              zIndex: 10,
+            }}
+          >
+            <select
+              value={lensAspectRatio}
+              onChange={(e) => setLensAspectRatio(e.target.value)}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "8px",
+                backgroundColor: "rgba(0, 0, 0, 0.7)",
+                backdropFilter: "blur(10px)",
+                color: "white",
+                border: "1px solid rgba(255, 255, 255, 0.2)",
+                fontSize: "13px",
+                fontWeight: "500",
+                cursor: "pointer",
+                outline: "none",
+              }}
+            >
+              <option value="16:9">16:9</option>
+              <option value="16:10">16:10</option>
+              <option value="4:3">4:3</option>
+              <option value="21:9">21:9</option>
+              <option value="2.39:1">2.39:1</option>
+              <option value="1:1">1:1</option>
+              <option value="custom">Custom</option>
+            </select>
+
+            {/* Custom Aspect Ratio Inputs */}
+            {lensAspectRatio === "custom" && (
+              <div
+                style={{
+                  marginTop: "8px",
+                  display: "flex",
+                  gap: "6px",
+                  alignItems: "center",
+                }}
+              >
+                <input
+                  type="number"
+                  value={customAspectWidth}
+                  onChange={(e) => setCustomAspectWidth(e.target.value)}
+                  placeholder="W"
+                  style={{
+                    width: "50px",
+                    padding: "6px",
+                    borderRadius: "6px",
+                    backgroundColor: "rgba(0, 0, 0, 0.7)",
+                    backdropFilter: "blur(10px)",
+                    color: "white",
+                    border: "1px solid rgba(255, 255, 255, 0.2)",
+                    fontSize: "12px",
+                    textAlign: "center",
+                    outline: "none",
+                  }}
+                />
+                <span style={{ color: "white", fontSize: "12px" }}>:</span>
+                <input
+                  type="number"
+                  value={customAspectHeight}
+                  onChange={(e) => setCustomAspectHeight(e.target.value)}
+                  placeholder="H"
+                  style={{
+                    width: "50px",
+                    padding: "6px",
+                    borderRadius: "6px",
+                    backgroundColor: "rgba(0, 0, 0, 0.7)",
+                    backdropFilter: "blur(10px)",
+                    color: "white",
+                    border: "1px solid rgba(255, 255, 255, 0.2)",
+                    fontSize: "12px",
+                    textAlign: "center",
+                    outline: "none",
+                  }}
+                />
               </div>
+            )}
+          </div>
+
+          {/* Throw Ratio Slider - Bottom Center */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: "80px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "80%",
+              maxWidth: "400px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+            }}
+          >
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              color: "white",
+              fontSize: "13px",
+              textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+            }}>
+              <span>0.3:1</span>
+              <span style={{ fontWeight: "600", fontSize: "15px" }}>
+                {lensThrowRatio.toFixed(2)}:1
+              </span>
+              <span>5.0:1</span>
+            </div>
+            <input
+              type="range"
+              min="0.3"
+              max="5.0"
+              step="0.01"
+              value={lensThrowRatio}
+              onChange={(e) => setLensThrowRatio(parseFloat(e.target.value))}
+              style={{
+                width: "100%",
+                height: "4px",
+                accentColor: "#3b82f6",
+                cursor: "pointer",
+              }}
+            />
+          </div>
+
+          {/* Throw Distance Slider - Right Side (Vertical) */}
+          <div
+            style={{
+              position: "absolute",
+              right: "20px",
+              top: "50%",
+              transform: "translateY(-50%)",
+              height: "60%",
+              maxHeight: "500px",
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: "12px",
+            }}
+          >
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              color: "white",
+              fontSize: "12px",
+              textShadow: "0 1px 3px rgba(0,0,0,0.8)",
+              gap: "8px",
+            }}>
+              <span>{(unit === "feet" || unit === "inches") ? "100ft" : "30m"}</span>
               <input
                 type="range"
-                min="0.8"
-                max="3.0"
-                step="0.1"
-                value={lensThrowRatio}
-                onChange={(e) => setLensThrowRatio(parseFloat(e.target.value))}
+                min={(unit === "feet" || unit === "inches") ? "3" : "1"}
+                max={(unit === "feet" || unit === "inches") ? "100" : "30"}
+                step={(unit === "feet" || unit === "inches") ? "0.5" : "0.1"}
+                value={lensThrowDistance}
+                onChange={(e) => setLensThrowDistance(parseFloat(e.target.value))}
                 style={{
                   width: "100%",
-                  accentColor: "#3b82f6",
+                  height: "4px",
+                  accentColor: "#10b981",
+                  cursor: "pointer",
+                  transform: "rotate(-90deg)",
+                  transformOrigin: "center",
                 }}
               />
-              <div className="flex justify-between text-xs text-gray-400 mt-1">
-                <span>Short (0.8:1)</span>
-                <span>Long (3.0:1)</span>
+              <span style={{ fontWeight: "600", fontSize: "14px" }}>
+                {lensThrowDistance.toFixed(1)}{(unit === "feet" || unit === "inches") ? "ft" : "m"}
+              </span>
+              <span>{(unit === "feet" || unit === "inches") ? "3ft" : "1m"}</span>
+              {/* Calculated projection width */}
+              <div style={{
+                marginTop: "12px",
+                padding: "8px 12px",
+                backgroundColor: "rgba(16, 185, 129, 0.2)",
+                backdropFilter: "blur(10px)",
+                borderRadius: "8px",
+                border: "1px solid rgba(16, 185, 129, 0.3)",
+                textAlign: "center",
+              }}>
+                <div style={{ fontSize: "10px", opacity: 0.8, marginBottom: "4px" }}>
+                  Projection Width
+                </div>
+                <div style={{ fontWeight: "600", fontSize: "13px" }}>
+                  {(lensThrowDistance / lensThrowRatio).toFixed(1)}{(unit === "feet" || unit === "inches") ? "ft" : "m"}
+                </div>
               </div>
-            </div>
-
-            <div className="text-xs text-gray-300 text-center">
-              Blue box shows projection coverage at current throw ratio
             </div>
           </div>
 
@@ -7792,7 +8423,7 @@ export function ProjectionCalculator() {
                     <p>• Access via HTTPS (not HTTP), OR</p>
                     <p>• Use Chrome/Safari on a phone/tablet</p>
                     <p className="mt-4 pt-4 border-t border-gray-600">
-                      This feature provides a live camera overlay showing<br/>
+                      This feature provides a live camera overlay showing<br />
                       projection coverage based on throw ratio.
                     </p>
                   </div>
@@ -7802,6 +8433,867 @@ export function ProjectionCalculator() {
               )}
             </div>
           )}
+
+          {/* Info Dialog */}
+          {showLensInfo && (
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                backgroundColor: "rgba(0, 0, 0, 0.85)",
+                backdropFilter: "blur(10px)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 20,
+                padding: "20px",
+              }}
+              onClick={() => setShowLensInfo(false)}
+            >
+              <div
+                style={{
+                  backgroundColor: "rgba(30, 30, 30, 0.95)",
+                  borderRadius: "16px",
+                  padding: "24px",
+                  maxWidth: "500px",
+                  maxHeight: "80vh",
+                  overflowY: "auto",
+                  color: "white",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <h2 style={{ fontSize: "20px", fontWeight: "bold" }}>Lens Preview Guide</h2>
+                  <button
+                    onClick={() => setShowLensInfo(false)}
+                    style={{
+                      width: "32px",
+                      height: "32px",
+                      borderRadius: "50%",
+                      backgroundColor: "rgba(255, 255, 255, 0.1)",
+                      border: "none",
+                      color: "white",
+                      fontSize: "20px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div style={{ fontSize: "14px", lineHeight: "1.6", color: "rgba(255, 255, 255, 0.9)" }}>
+                  <p style={{ marginBottom: "12px" }}>
+                    <strong>What is this?</strong><br />
+                    The Lens Preview tool lets you visualize projection coverage in real-time using your device's camera. Point your camera at the projection surface and see exactly where the projected image will appear.
+                  </p>
+
+                  <p style={{ marginBottom: "12px" }}>
+                    <strong>How to use:</strong>
+                  </p>
+                  <ul style={{ marginLeft: "20px", marginBottom: "12px" }}>
+                    <li style={{ marginBottom: "6px" }}>Select your projector's throw ratio using the slider at the bottom</li>
+                    <li style={{ marginBottom: "6px" }}>Choose the projection aspect ratio from the dropdown (bottom left)</li>
+                    <li style={{ marginBottom: "6px" }}>Switch camera zoom (0.5×, 1×, 2×, 3×) to match your viewing angle</li>
+                    <li style={{ marginBottom: "6px" }}>The blue rectangle shows where the projection will appear</li>
+                  </ul>
+
+                  <p style={{ marginBottom: "12px" }}>
+                    <strong>Camera Zoom Tips:</strong>
+                  </p>
+                  <ul style={{ marginLeft: "20px", marginBottom: "12px" }}>
+                    <li style={{ marginBottom: "6px" }}><strong>0.5×</strong> (Ultra-wide) - Use for short throw projectors or close distances</li>
+                    <li style={{ marginBottom: "6px" }}><strong>1×</strong> (Normal) - Default view, good for most scenarios</li>
+                    <li style={{ marginBottom: "6px" }}><strong>2×-3×</strong> (Telephoto) - Use for long throw projectors or far distances</li>
+                  </ul>
+
+                  <p style={{ marginBottom: "0", fontSize: "12px", color: "rgba(255, 255, 255, 0.6)" }}>
+                    Tip: This tool replaces traditional floor tape measurements. Stand at your projector position and adjust settings until the blue overlay matches your desired projection size.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Aspect Ratio Live Tab Content - Fullscreen Camera with Draggable Rectangle */}
+      <div
+        style={{
+          display: activeTab === "aspectLive" ? "block" : "none",
+          height: "100vh",
+          width: "100vw",
+          position: "fixed",
+          top: 0,
+          left: 0,
+          zIndex: 10000,
+          backgroundColor: "#000",
+          touchAction: "none",
+          overscrollBehavior: "none",
+        }}
+      >
+        <div style={{
+          position: "relative",
+          width: "100%",
+          height: "100vh",
+          overflow: "hidden",
+        }}>
+          {/* Live Camera Feed or Photo */}
+          {aspectLiveMode === "live" ? (
+            <video
+              ref={aspectLiveVideoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
+            />
+          ) : aspectLivePhoto ? (
+            <img
+              src={aspectLivePhoto}
+              alt="Captured"
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
+            />
+          ) : (
+            <div style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              color: "white",
+              textAlign: "center",
+            }}>
+              <p>No photo selected</p>
+            </div>
+          )}
+
+          {/* Draggable Aspect Ratio Rectangle Overlay */}
+          <svg
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              pointerEvents: "none",
+              touchAction: "none",
+              userSelect: "none",
+              WebkitUserSelect: "none",
+              WebkitTouchCallout: "none",
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {/* Rectangle */}
+            <rect
+              x={aspectLiveRect.x}
+              y={aspectLiveRect.y}
+              width={aspectLiveRect.width}
+              height={aspectLiveRect.height}
+              fill="rgba(59, 130, 246, 0.2)"
+              stroke="#3b82f6"
+              strokeWidth="3"
+              style={{
+                pointerEvents: "all",
+                cursor: aspectLiveDragging ? "grabbing" : "grab",
+                touchAction: "none",
+                userSelect: "none",
+                WebkitUserSelect: "none",
+              }}
+              onPointerDown={(e) => {
+                console.log("🔵 Main rect onPointerDown", {
+                  pointerType: e.pointerType,
+                  pointerId: e.pointerId,
+                  isPrimary: e.isPrimary,
+                  button: e.button,
+                  buttons: e.buttons,
+                  timestamp: Date.now(),
+                });
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.setPointerCapture(e.pointerId);
+                const svg = e.currentTarget.ownerSVGElement;
+                if (!svg) return;
+                const pt = svg.createSVGPoint();
+                pt.x = e.clientX;
+                pt.y = e.clientY;
+                const svgP = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+                console.log("🔵 Setting aspectLiveDragging to 'move'");
+                aspectLiveDraggingRef.current = "move";
+                setAspectLiveDragging("move");
+                setAspectLiveDragStart({ x: svgP.x - aspectLiveRect.x, y: svgP.y - aspectLiveRect.y });
+              }}
+              onPointerMove={(e) => {
+                console.log("🟢 Main rect onPointerMove", {
+                  aspectLiveDraggingRef: aspectLiveDraggingRef.current,
+                });
+                if (!aspectLiveDraggingRef.current || aspectLiveDraggingRef.current !== "move") return;
+
+                e.preventDefault();
+                const svg = e.currentTarget.ownerSVGElement;
+                if (!svg) return;
+                const rect = svg.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                setAspectLiveRect(prev => ({
+                  ...prev,
+                  x: Math.max(0, Math.min(rect.width - prev.width, x - aspectLiveDragStart.x)),
+                  y: Math.max(0, Math.min(rect.height - prev.height, y - aspectLiveDragStart.y)),
+                }));
+              }}
+              onPointerUp={(e) => {
+                console.log("🔴 Main rect onPointerUp");
+                e.currentTarget.releasePointerCapture(e.pointerId);
+                aspectLiveDraggingRef.current = null;
+                setAspectLiveDragging(null);
+              }}
+              onPointerCancel={(e) => {
+                console.log("⚠️ Main rect onPointerCancel");
+                aspectLiveDraggingRef.current = null;
+                setAspectLiveDragging(null);
+              }}
+              onContextMenu={(e) => e.preventDefault()}
+            />
+
+            {/* Corner Handles */}
+            {["nw", "ne", "sw", "se"].map((corner) => {
+              const x = corner.includes("w") ? aspectLiveRect.x : aspectLiveRect.x + aspectLiveRect.width;
+              const y = corner.includes("n") ? aspectLiveRect.y : aspectLiveRect.y + aspectLiveRect.height;
+
+              return (
+                <circle
+                  key={corner}
+                  cx={x}
+                  cy={y}
+                  r="12"
+                  fill="#3b82f6"
+                  stroke="white"
+                  strokeWidth="2"
+                  style={{
+                    pointerEvents: "all",
+                    cursor: "nwse-resize",
+                    touchAction: "none",
+                    userSelect: "none",
+                    WebkitUserSelect: "none",
+                  }}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    const svg = e.currentTarget.ownerSVGElement;
+                    if (!svg) return;
+                    const pt = svg.createSVGPoint();
+                    pt.x = e.clientX;
+                    pt.y = e.clientY;
+                    const svgP = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+                    aspectLiveDraggingRef.current = corner as any;
+                    setAspectLiveDragging(corner as any);
+                    setAspectLiveDragStart({ x: svgP.x, y: svgP.y });
+                  }}
+                  onPointerMove={(e) => {
+                    const handleType = aspectLiveDraggingRef.current;
+                    if (!handleType || handleType === "move") return;
+
+                    e.preventDefault();
+                    const svg = e.currentTarget.ownerSVGElement;
+                    if (!svg) return;
+                    const rect = svg.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
+
+                    const currentRect = aspectLiveRect;
+                    const isCustom = selectedAspectRatio === "custom";
+                    const aspectRatio = aspectRatios[selectedAspectRatio] || 16 / 9;
+
+                    let newRect = { ...currentRect };
+                    const viewWidth = rect.width;
+                    const viewHeight = rect.height;
+
+                    if (handleType === "se") {
+                      const newWidth = Math.max(100, Math.min(x - currentRect.x, viewWidth - currentRect.x));
+                      const newHeight = isCustom ? Math.max(100, Math.min(y - currentRect.y, viewHeight - currentRect.y)) : newWidth / aspectRatio;
+                      newRect.width = newWidth;
+                      newRect.height = Math.min(newHeight, viewHeight - currentRect.y);
+                    } else if (handleType === "sw") {
+                      const newWidth = Math.max(100, Math.min(currentRect.x + currentRect.width - x, currentRect.x + currentRect.width));
+                      const newHeight = isCustom ? Math.max(100, Math.min(y - currentRect.y, viewHeight - currentRect.y)) : newWidth / aspectRatio;
+                      newRect.x = Math.max(0, currentRect.x + currentRect.width - newWidth);
+                      newRect.width = newWidth;
+                      newRect.height = Math.min(newHeight, viewHeight - currentRect.y);
+                    } else if (handleType === "ne") {
+                      const newWidth = Math.max(100, Math.min(x - currentRect.x, viewWidth - currentRect.x));
+                      const newHeight = isCustom ? Math.max(100, Math.min(currentRect.y + currentRect.height - y, currentRect.y + currentRect.height)) : newWidth / aspectRatio;
+                      newRect.width = newWidth;
+                      newRect.y = Math.max(0, currentRect.y + currentRect.height - newHeight);
+                      newRect.height = newHeight;
+                    } else if (handleType === "nw") {
+                      const newWidth = Math.max(100, Math.min(currentRect.x + currentRect.width - x, currentRect.x + currentRect.width));
+                      const newHeight = isCustom ? Math.max(100, Math.min(currentRect.y + currentRect.height - y, currentRect.y + currentRect.height)) : newWidth / aspectRatio;
+                      newRect.x = Math.max(0, currentRect.x + currentRect.width - newWidth);
+                      newRect.width = newWidth;
+                      newRect.y = Math.max(0, currentRect.y + currentRect.height - newHeight);
+                      newRect.height = newHeight;
+                    }
+
+                    setAspectLiveRect(newRect);
+                  }}
+                  onPointerUp={(e) => {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    aspectLiveDraggingRef.current = null;
+                    setAspectLiveDragging(null);
+                  }}
+                  onPointerCancel={() => {
+                    aspectLiveDraggingRef.current = null;
+                    setAspectLiveDragging(null);
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+              );
+            })}
+
+            {/* Resolution Text Overlay - Center of Rectangle */}
+            <text
+              x={aspectLiveRect.x + aspectLiveRect.width / 2}
+              y={aspectLiveRect.y + aspectLiveRect.height / 2}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fill="white"
+              fontSize="20"
+              fontWeight="600"
+              style={{
+                pointerEvents: "none",
+                textShadow: "0 2px 8px rgba(0,0,0,0.8)",
+                filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.8))",
+              }}
+            >
+              {(() => {
+                const pxWidth = parseFloat(pixelWidth) || 1920;
+                const currentAspectRatio = aspectLiveRect.width / aspectLiveRect.height;
+                const pxHeight = Math.round(pxWidth / currentAspectRatio);
+                return `${pxWidth} × ${pxHeight}`;
+              })()}
+            </text>
+            <text
+              x={aspectLiveRect.x + aspectLiveRect.width / 2}
+              y={aspectLiveRect.y + aspectLiveRect.height / 2 + 28}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fill="white"
+              fontSize="16"
+              fontWeight="400"
+              style={{
+                pointerEvents: "none",
+                opacity: 0.8,
+                filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.8))",
+              }}
+            >
+              {(() => {
+                const currentAspectRatio = aspectLiveRect.width / aspectLiveRect.height;
+                return `${currentAspectRatio.toFixed(2)}:1`;
+              })()}
+            </text>
+
+            {/* Region Rectangles */}
+            {regions.map((region) => (
+              <g key={region.id}>
+                {/* Region Rectangle */}
+                <rect
+                  x={region.x}
+                  y={region.y}
+                  width={region.width}
+                  height={region.height}
+                  fill="rgba(16, 185, 129, 0.2)"
+                  stroke="#10b981"
+                  strokeWidth="3"
+                  style={{
+                    pointerEvents: "all",
+                    cursor: draggingRegion?.id === region.id ? "grabbing" : "grab",
+                    touchAction: "none",
+                    userSelect: "none",
+                    WebkitUserSelect: "none",
+                  }}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    const svg = e.currentTarget.ownerSVGElement;
+                    if (!svg) return;
+                    const pt = svg.createSVGPoint();
+                    pt.x = e.clientX;
+                    pt.y = e.clientY;
+                    const svgP = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+                    draggingRegionRef.current = { id: region.id, type: "move" };
+                    setDraggingRegion({ id: region.id, type: "move" });
+                    setRegionDragStart({ x: svgP.x - region.x, y: svgP.y - region.y });
+                  }}
+                  onPointerMove={(e) => {
+                    const draggingRegion = draggingRegionRef.current;
+                    if (!draggingRegion || draggingRegion.id !== region.id || draggingRegion.type !== "move") return;
+
+                    e.preventDefault();
+                    const svg = e.currentTarget.ownerSVGElement;
+                    if (!svg) return;
+                    const rect = svg.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
+
+                    setRegions((prevRegions) =>
+                      prevRegions.map((r) => {
+                        if (r.id !== region.id) return r;
+                        const newX = Math.max(aspectLiveRect.x, Math.min(aspectLiveRect.x + aspectLiveRect.width - r.width, x - regionDragStart.x));
+                        const newY = Math.max(aspectLiveRect.y, Math.min(aspectLiveRect.y + aspectLiveRect.height - r.height, y - regionDragStart.y));
+                        const unsnappedRegion = { ...r, x: newX, y: newY };
+                        return applySnapping(unsnappedRegion, prevRegions);
+                      })
+                    );
+                  }}
+                  onPointerUp={(e) => {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    draggingRegionRef.current = null;
+                    setDraggingRegion(null);
+                  }}
+                  onPointerCancel={() => {
+                    draggingRegionRef.current = null;
+                    setDraggingRegion(null);
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+
+                {/* Corner Handles for Region */}
+                {["nw", "ne", "sw", "se"].map((corner) => {
+                  const x = corner.includes("w") ? region.x : region.x + region.width;
+                  const y = corner.includes("n") ? region.y : region.y + region.height;
+
+                  return (
+                    <circle
+                      key={corner}
+                      cx={x}
+                      cy={y}
+                      r="12"
+                      fill="#10b981"
+                      stroke="white"
+                      strokeWidth="2"
+                      style={{
+                        pointerEvents: "all",
+                        cursor: "nwse-resize",
+                        touchAction: "none",
+                        userSelect: "none",
+                        WebkitUserSelect: "none",
+                      }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        const svg = e.currentTarget.ownerSVGElement;
+                        if (!svg) return;
+                        const pt = svg.createSVGPoint();
+                        pt.x = e.clientX;
+                        pt.y = e.clientY;
+                        const svgP = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+                        draggingRegionRef.current = { id: region.id, type: corner as any };
+                        setDraggingRegion({ id: region.id, type: corner as any });
+                        setRegionDragStart({ x: svgP.x, y: svgP.y });
+                      }}
+                      onPointerMove={(e) => {
+                        const draggingRegion = draggingRegionRef.current;
+                        if (!draggingRegion || draggingRegion.id !== region.id || draggingRegion.type === "move") return;
+
+                        e.preventDefault();
+                        const svg = e.currentTarget.ownerSVGElement;
+                        if (!svg) return;
+                        const rect = svg.getBoundingClientRect();
+                        const x = e.clientX - rect.left;
+                        const y = e.clientY - rect.top;
+
+                        setRegions((prevRegions) =>
+                          prevRegions.map((r) => {
+                            if (r.id !== region.id) return r;
+
+                            let newRect = { ...r };
+                            const handleType = draggingRegion.type;
+
+                            if (handleType === "se") {
+                              const maxWidth = aspectLiveRect.x + aspectLiveRect.width - r.x;
+                              const maxHeight = aspectLiveRect.y + aspectLiveRect.height - r.y;
+                              newRect.width = Math.max(50, Math.min(maxWidth, x - r.x));
+                              newRect.height = Math.max(50, Math.min(maxHeight, y - r.y));
+                            } else if (handleType === "sw") {
+                              const maxHeight = aspectLiveRect.y + aspectLiveRect.height - r.y;
+                              const minX = aspectLiveRect.x;
+                              const newWidth = Math.max(50, r.x + r.width - Math.max(minX, x));
+                              newRect.x = r.x + r.width - newWidth;
+                              newRect.width = newWidth;
+                              newRect.height = Math.max(50, Math.min(maxHeight, y - r.y));
+                            } else if (handleType === "ne") {
+                              const maxWidth = aspectLiveRect.x + aspectLiveRect.width - r.x;
+                              const minY = aspectLiveRect.y;
+                              const newHeight = Math.max(50, r.y + r.height - Math.max(minY, y));
+                              newRect.width = Math.max(50, Math.min(maxWidth, x - r.x));
+                              newRect.y = r.y + r.height - newHeight;
+                              newRect.height = newHeight;
+                            } else if (handleType === "nw") {
+                              const minX = aspectLiveRect.x;
+                              const minY = aspectLiveRect.y;
+                              const newWidth = Math.max(50, r.x + r.width - Math.max(minX, x));
+                              const newHeight = Math.max(50, r.y + r.height - Math.max(minY, y));
+                              newRect.x = r.x + r.width - newWidth;
+                              newRect.width = newWidth;
+                              newRect.y = r.y + r.height - newHeight;
+                              newRect.height = newHeight;
+                            }
+
+                            return applyResizeSnapping(newRect, prevRegions);
+                          })
+                        );
+                      }}
+                      onPointerUp={(e) => {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                        draggingRegionRef.current = null;
+                        setDraggingRegion(null);
+                      }}
+                      onPointerCancel={() => {
+                        draggingRegionRef.current = null;
+                        setDraggingRegion(null);
+                      }}
+                      onContextMenu={(e) => e.preventDefault()}
+                    />
+                  );
+                })}
+
+                {/* Delete Button (X) for Region */}
+                <g
+                  style={{ pointerEvents: "all", cursor: "pointer" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRegions(regions.filter((r) => r.id !== region.id));
+                  }}
+                >
+                  <circle
+                    cx={region.x + region.width - 20}
+                    cy={region.y + 20}
+                    r="16"
+                    fill="rgba(239, 68, 68, 0.9)"
+                    stroke="white"
+                    strokeWidth="2"
+                  />
+                  <text
+                    x={region.x + region.width - 20}
+                    y={region.y + 20}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill="white"
+                    fontSize="18"
+                    fontWeight="700"
+                    style={{ pointerEvents: "none" }}
+                  >
+                    ×
+                  </text>
+                </g>
+
+                {/* Resolution Text for Region */}
+                <text
+                  x={region.x + region.width / 2}
+                  y={region.y + region.height / 2}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fill="white"
+                  fontSize="16"
+                  fontWeight="600"
+                  style={{
+                    pointerEvents: "none",
+                    filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.8))",
+                  }}
+                >
+                  {(() => {
+                    const pxWidth = parseFloat(pixelWidth) || 1920;
+                    const mainAspectRatio = aspectLiveRect.width / aspectLiveRect.height;
+                    const pxHeight = Math.round(pxWidth / mainAspectRatio);
+
+                    // Calculate region resolution based on ratio to main rectangle
+                    const regionPxWidth = Math.round((region.width / aspectLiveRect.width) * pxWidth);
+                    const regionPxHeight = Math.round((region.height / aspectLiveRect.height) * pxHeight);
+
+                    return `${regionPxWidth} × ${regionPxHeight}`;
+                  })()}
+                </text>
+              </g>
+            ))}
+          </svg>
+
+          {/* Top Controls */}
+          <div style={{
+            position: "absolute",
+            top: "calc(env(safe-area-inset-top, 0px) + 8px)",
+            left: "calc(env(safe-area-inset-left, 0px) + 12px)",
+            right: "calc(env(safe-area-inset-right, 0px) + 12px)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            zIndex: 1000,
+          }}>
+            {/* Mode Toggle */}
+            <div style={{
+              display: "flex",
+              gap: "4px",
+              backgroundColor: "rgba(0, 0, 0, 0.5)",
+              backdropFilter: "blur(10px)",
+              borderRadius: "8px",
+              padding: "3px",
+            }}>
+              <button
+                onClick={() => setAspectLiveMode("live")}
+                style={{
+                  padding: "5px 10px",
+                  borderRadius: "6px",
+                  backgroundColor: aspectLiveMode === "live" ? "#3b82f6" : "transparent",
+                  color: "white",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: aspectLiveMode === "live" ? "600" : "normal",
+                }}
+              >
+                Live
+              </button>
+              <button
+                onClick={() => setAspectLiveMode("photo")}
+                style={{
+                  padding: "5px 10px",
+                  borderRadius: "6px",
+                  backgroundColor: aspectLiveMode === "photo" ? "#3b82f6" : "transparent",
+                  color: "white",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: aspectLiveMode === "photo" ? "600" : "normal",
+                }}
+              >
+                Photo
+              </button>
+            </div>
+
+            {/* Close Button */}
+            <button
+              onClick={() => handleTabChange("resolution")}
+              style={{
+                width: "32px",
+                height: "32px",
+                borderRadius: "50%",
+                backgroundColor: "rgba(0, 0, 0, 0.5)",
+                backdropFilter: "blur(10px)",
+                border: "1px solid rgba(255, 255, 255, 0.2)",
+                color: "white",
+                fontSize: "18px",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Bottom Controls */}
+          <div style={{
+            position: "absolute",
+            bottom: "calc(env(safe-area-inset-bottom, 0px) + 8px)",
+            left: "calc(env(safe-area-inset-left, 0px) + 12px)",
+            right: "calc(env(safe-area-inset-right, 0px) + 12px)",
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "space-between",
+            alignItems: "flex-end",
+            zIndex: 1000,
+            gap: "8px",
+          }}>
+            {/* Aspect Ratio Selector + Add Region */}
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <select
+                value={selectedAspectRatio}
+                onChange={(e) => {
+                  setSelectedAspectRatio(e.target.value);
+                  if (e.target.value !== "custom") {
+                    const newAspectRatio = aspectRatios[e.target.value] || 16 / 9;
+                    setAspectLiveRect(prev => ({
+                      ...prev,
+                      height: prev.width / newAspectRatio,
+                    }));
+                  }
+                  // For custom, don't adjust - let user resize freely
+                }}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(0, 0, 0, 0.5)",
+                  backdropFilter: "blur(10px)",
+                  border: "1px solid rgba(255, 255, 255, 0.2)",
+                  color: "white",
+                  fontSize: "13px",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="custom">Custom</option>
+                <option value="16:9">16:9</option>
+                <option value="16:10">16:10</option>
+                <option value="4:3">4:3</option>
+                <option value="21:9">21:9</option>
+                <option value="9:16">9:16</option>
+                <option value="2.39:1">2.39:1</option>
+                <option value="1:1">1:1</option>
+              </select>
+
+              {/* Add Region Button */}
+              <button
+                onClick={() => {
+                  if (regions.length >= 12) {
+                    alert("Maximum 12 regions allowed");
+                    return;
+                  }
+                  // Create a new region in the center of the main rectangle
+                  const newRegion: Region = {
+                    id: `region-${Date.now()}`,
+                    x: aspectLiveRect.x + aspectLiveRect.width / 2 - 75,
+                    y: aspectLiveRect.y + aspectLiveRect.height / 2 - 75,
+                    width: 150,
+                    height: 150,
+                  };
+                  setRegions([...regions, newRegion]);
+                }}
+                disabled={regions.length >= 12}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "8px",
+                  backgroundColor: regions.length >= 12 ? "rgba(100, 100, 100, 0.5)" : "#10b981",
+                  border: "none",
+                  color: "white",
+                  fontSize: "13px",
+                  fontWeight: "600",
+                  cursor: regions.length >= 12 ? "not-allowed" : "pointer",
+                  opacity: regions.length >= 12 ? 0.5 : 1,
+                }}
+              >
+                Add Region
+              </button>
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              {aspectLiveMode === "live" ? (
+                <>
+                  {/* Camera Zoom Buttons */}
+                  <div style={{
+                    display: "flex",
+                    gap: "2px",
+                    backgroundColor: "rgba(0, 0, 0, 0.5)",
+                    backdropFilter: "blur(10px)",
+                    borderRadius: "8px",
+                    padding: "3px",
+                  }}>
+                    {[0.5, 1.0, 2.0, 3.0].map((zoom) => (
+                      <button
+                        key={zoom}
+                        onClick={() => setAspectLiveZoomLevel(zoom)}
+                        style={{
+                          padding: "5px 8px",
+                          borderRadius: "6px",
+                          backgroundColor: aspectLiveZoomLevel === zoom ? "#3b82f6" : "transparent",
+                          color: "white",
+                          border: "none",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          fontWeight: aspectLiveZoomLevel === zoom ? "600" : "normal",
+                        }}
+                      >
+                        {zoom}×
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Capture Photo */}
+                  <button
+                    onClick={captureAspectLivePhoto}
+                    style={{
+                      width: "44px",
+                      height: "44px",
+                      borderRadius: "50%",
+                      backgroundColor: "#3b82f6",
+                      border: "3px solid white",
+                      cursor: "pointer",
+                    }}
+                  />
+                </>
+              ) : (
+                <>
+                  {/* Select Photo */}
+                  <label
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "8px",
+                      backgroundColor: "rgba(0, 0, 0, 0.5)",
+                      backdropFilter: "blur(10px)",
+                      border: "1px solid rgba(255, 255, 255, 0.2)",
+                      color: "white",
+                      fontSize: "13px",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    📁 Import Photo
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (event) => {
+                            setAspectLivePhoto(event.target?.result as string);
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                    />
+                  </label>
+
+                  {/* Back to Live */}
+                  <button
+                    onClick={() => setAspectLiveMode("live")}
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "8px",
+                      backgroundColor: "#3b82f6",
+                      border: "none",
+                      color: "white",
+                      fontSize: "13px",
+                      fontWeight: "600",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Back to Live
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 

@@ -5,7 +5,8 @@
   "ios": {
     "minVersion": "14.0",
     "backgroundColor": "#020618",
-    "contentInset": "automatic"
+    "contentInset": "never",
+    "allowsLinkPreview": false
   },
   "android": {
     "backgroundColor": "#020618"
