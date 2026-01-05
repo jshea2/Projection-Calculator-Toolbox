@@ -33,6 +33,7 @@ import {
   Grid2x2,
   RectangleVertical,
   Menu,
+  ExternalLink,
 } from "lucide-react";
 import { IOSButton, IOSCard, IOSInput, IOSSelect, IOSTabBar } from "./ios";
 import * as pdfjsLib from "pdfjs-dist";
@@ -359,7 +360,7 @@ export function ProjectionCalculator() {
   // Tab state
   const [activeTab, setActiveTab] = useState<
     "resolution" | "projector" | "aspectLive" | "cad" | "lens"
-  >("cad");
+  >("projector");
   const [previousTab, setPreviousTab] = useState<
     "resolution" | "projector" | "aspectLive" | "cad" | "lens"
   >("cad");
@@ -679,6 +680,7 @@ export function ProjectionCalculator() {
   // Aspect Ratio Live states
   const [aspectLiveMode, setAspectLiveMode] = useState<"live" | "photo">("live");
   const [aspectLiveCameraActive, setAspectLiveCameraActive] = useState(false);
+  const [aspectLiveInfoOpen, setAspectLiveInfoOpen] = useState(false);
   const [aspectLiveFacingMode, setAspectLiveFacingMode] = useState<"user" | "environment">("environment");
   const [aspectLiveZoomLevel, setAspectLiveZoomLevel] = useState<number>(1.0);
   const [aspectLivePhoto, setAspectLivePhoto] = useState<string | null>(null);
@@ -1298,6 +1300,192 @@ export function ProjectionCalculator() {
     }
   }, [cadFullscreen, activeTab]);
   const [cadFloorZVisible, setCadFloorZVisible] = useState<boolean>(false); // Whether to show the Floor Z handle
+  const [cadFullscreenControl, setCadFullscreenControl] = useState<"throwDistance" | "throwRatio" | "lensShift" | "screenYaw">("throwDistance"); // Fullscreen slider control
+  const [cadDistanceLock, setCadDistanceLock] = useState<"screen" | "projector">("screen"); // Lock screen or projector when adjusting distance
+
+  // Mini-preview state
+  const [cadMiniPreviewVisible, setCadMiniPreviewVisible] = useState<boolean>(false); // Whether mini-preview is showing
+  const [cadMiniPreviewDismissed, setCadMiniPreviewDismissed] = useState<boolean>(false); // User manually dismissed it
+  const [cadMiniPreviewPosition, setCadMiniPreviewPosition] = useState<{ x: number; y: number }>({ x: 20, y: 100 }); // Position from right/bottom
+  const [cadMiniPreviewDragging, setCadMiniPreviewDragging] = useState<boolean>(false);
+  const [cadMiniPreviewDragStart, setCadMiniPreviewDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const cadMainViewerRef = useRef<HTMLDivElement>(null); // Ref to track main viewer visibility
+  const cadMiniPreviewCanvasRef = useRef<HTMLCanvasElement>(null); // Canvas for mini-preview
+
+  // Throw tab mini-preview state
+  const [throwMiniPreviewVisible, setThrowMiniPreviewVisible] = useState<boolean>(false);
+  const [throwMiniPreviewDismissed, setThrowMiniPreviewDismissed] = useState<boolean>(false);
+  const [throwMiniPreviewPosition, setThrowMiniPreviewPosition] = useState<{ x: number; y: number }>({ x: 20, y: 100 });
+  const [throwMiniPreviewDragging, setThrowMiniPreviewDragging] = useState<boolean>(false);
+  const [throwMiniPreviewDragStart, setThrowMiniPreviewDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const throwMainViewerRef = useRef<HTMLDivElement>(null);
+  const throwMiniPreviewCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // IntersectionObserver to detect when main viewer is out of view
+  useEffect(() => {
+    if (activeTab !== "cad" || !cadMainViewerRef.current) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        // Show mini-preview when main viewer is less than 20% visible
+        const isMainViewerVisible = entry.isIntersecting && entry.intersectionRatio > 0.2;
+
+        if (!isMainViewerVisible && !cadMiniPreviewDismissed && !cadFullscreen) {
+          setCadMiniPreviewVisible(true);
+        } else if (isMainViewerVisible) {
+          setCadMiniPreviewVisible(false);
+          // Reset dismissed state when main viewer becomes visible again
+          setCadMiniPreviewDismissed(false);
+        }
+      },
+      { threshold: [0, 0.2, 0.5, 1.0] }
+    );
+
+    observer.observe(cadMainViewerRef.current);
+
+    return () => observer.disconnect();
+  }, [activeTab, cadMiniPreviewDismissed, cadFullscreen]);
+
+  // Render mini-preview canvas by copying both PDF and overlay canvases with rotation
+  useEffect(() => {
+    if (!cadMiniPreviewVisible || !cadMiniPreviewCanvasRef.current) return;
+
+    const copyToMiniPreview = () => {
+      const miniCanvas = cadMiniPreviewCanvasRef.current;
+      const pdfCanvas = cadCanvasRef.current;
+      const overlayCanvas = cadOverlayRef.current;
+      if (!miniCanvas || !pdfCanvas || !overlayCanvas || pdfCanvas.width === 0) return;
+
+      // High DPI scaling for crisp rendering
+      const dpr = window.devicePixelRatio || 1;
+
+      // Account for rotation - swap dimensions if rotated 90 or 270 degrees
+      const isRotated90or270 = cadRotation === 90 || cadRotation === 270;
+      const sourceWidth = isRotated90or270 ? pdfCanvas.height : pdfCanvas.width;
+      const sourceHeight = isRotated90or270 ? pdfCanvas.width : pdfCanvas.height;
+
+      // Set mini canvas size to match rotated aspect ratio, scaled down
+      const maxWidth = 336;
+      const maxHeight = 240;
+      const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
+
+      const displayWidth = sourceWidth * scale;
+      const displayHeight = sourceHeight * scale;
+
+      // Set canvas size at higher resolution for crisp rendering
+      miniCanvas.width = displayWidth * dpr;
+      miniCanvas.height = displayHeight * dpr;
+      miniCanvas.style.width = `${displayWidth}px`;
+      miniCanvas.style.height = `${displayHeight}px`;
+
+      const ctx = miniCanvas.getContext("2d");
+      if (!ctx) return;
+
+      // Scale for high DPI displays
+      ctx.scale(dpr, dpr);
+
+      // Enable image smoothing for better quality
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      // Clear and set background
+      ctx.fillStyle = "#1e293b";
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
+
+      // Apply rotation transform
+      ctx.save();
+      ctx.translate(displayWidth / 2, displayHeight / 2);
+      ctx.rotate((cadRotation * Math.PI) / 180);
+
+      // Calculate draw position after rotation
+      const drawWidth = pdfCanvas.width * scale;
+      const drawHeight = pdfCanvas.height * scale;
+
+      // Draw the PDF canvas first (background)
+      ctx.drawImage(pdfCanvas, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+
+      // Draw the overlay canvas on top (projectors, screens, etc.)
+      ctx.drawImage(overlayCanvas, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+
+      ctx.restore();
+    };
+
+    // Copy immediately and set up interval for live updates
+    copyToMiniPreview();
+    const interval = setInterval(copyToMiniPreview, 100); // Update 10 times per second
+
+    return () => clearInterval(interval);
+  }, [cadMiniPreviewVisible, cadRotation]);
+
+  // Hide throw mini-preview when leaving the projector tab
+  useEffect(() => {
+    if (activeTab !== "projector") {
+      setThrowMiniPreviewVisible(false);
+    }
+  }, [activeTab]);
+
+  // Render throw mini-preview canvas by copying the projector canvas
+  useEffect(() => {
+    if (!throwMiniPreviewVisible || !throwMiniPreviewCanvasRef.current) return;
+
+    const copyToMiniPreview = () => {
+      const miniCanvas = throwMiniPreviewCanvasRef.current;
+      const sourceCanvas = projectorCanvasRef.current;
+      if (!miniCanvas || !sourceCanvas || sourceCanvas.width === 0) return;
+
+      // Custom size for better quality
+      const targetWidth = 350;
+      const targetHeight = 300;
+      const dpr = window.devicePixelRatio || 1;
+
+      // Set canvas size at higher resolution for crisp rendering
+      miniCanvas.width = targetWidth * dpr;
+      miniCanvas.height = targetHeight * dpr;
+      miniCanvas.style.width = `${targetWidth}px`;
+      miniCanvas.style.height = `${targetHeight}px`;
+
+      const ctx = miniCanvas.getContext("2d");
+      if (!ctx) return;
+
+      // Scale for high DPI displays
+      ctx.scale(dpr, dpr);
+
+      // Clear with white background
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+      // Calculate scaling to fit source canvas while maintaining aspect ratio
+      const sourceAspect = sourceCanvas.width / sourceCanvas.height;
+      const targetAspect = targetWidth / targetHeight;
+
+      let drawWidth, drawHeight, offsetX, offsetY;
+      if (sourceAspect > targetAspect) {
+        // Source is wider - fit to width
+        drawWidth = targetWidth;
+        drawHeight = targetWidth / sourceAspect;
+        offsetX = 0;
+        offsetY = (targetHeight - drawHeight) / 2;
+      } else {
+        // Source is taller - fit to height
+        drawHeight = targetHeight;
+        drawWidth = targetHeight * sourceAspect;
+        offsetX = (targetWidth - drawWidth) / 2;
+        offsetY = 0;
+      }
+
+      // Enable image smoothing for better quality
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      ctx.drawImage(sourceCanvas, offsetX, offsetY, drawWidth, drawHeight);
+    };
+
+    copyToMiniPreview();
+    const interval = setInterval(copyToMiniPreview, 100);
+
+    return () => clearInterval(interval);
+  }, [throwMiniPreviewVisible]);
 
   // Helper to get selected projector
   const getSelectedProjector = () => cadProjectors.find(p => p.id === cadSelectedProjector) || cadProjectors[0];
@@ -2021,7 +2209,8 @@ export function ProjectionCalculator() {
       const feetPerInch = cadScaleMode === "architect"
         ? 1 / (architectScales[cadScale] || 0.25)
         : parseFloat(cadCustomScale) || 1;
-      const distFeet = (distPx / 108) * feetPerInch;
+      const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+      const distFeet = (distPx / renderingDPI) * feetPerInch;
 
       // Format distance based on unit
       let distText = "";
@@ -2175,8 +2364,10 @@ export function ProjectionCalculator() {
   }, [cadPdfSize, cadRotation]);
 
   // Transform screen coordinates to canvas coordinates, accounting for rotation
+  // Note: The canvas element's bounding rect already accounts for pan offset via CSS transform
   const screenToCanvasCoords = useCallback((screenX: number, screenY: number, rect: DOMRect): { x: number; y: number } => {
     // Get position relative to center of bounding rect
+    // The rect already reflects the canvas's transformed position (including pan)
     const centerX = rect.width / 2;
     const centerY = rect.height / 2;
     const relX = (screenX - rect.left - centerX) / cadZoom;
@@ -2242,6 +2433,11 @@ export function ProjectionCalculator() {
       "3": 0.4
     };
     return scaleMap[architectScale] || 1.0;
+  };
+
+  // Calculate actual rendering DPI based on viewport scale (base PDF DPI is 72)
+  const getRenderingDPI = (architectScale: string): number => {
+    return 72 * getViewportScale(architectScale);
   };
 
   // Render PDF to canvas when document loads or page changes
@@ -3245,7 +3441,9 @@ export function ProjectionCalculator() {
       const scaleY = availableHeight / calculatedThrowDistance;
       const scale = Math.min(scaleX, scaleY) * 0.8;
 
-      const surfaceY = padding;
+      // Add extra top margin for labels (Throw Distance, Surface Width text)
+      const topLabelSpace = isMobile ? 45 : 50;
+      const surfaceY = padding + topLabelSpace;
       const surfaceWidth_scaled = surfaceWidth * scale;
       const surfaceLeftX =
         canvasWidth / 2 - surfaceWidth_scaled / 2;
@@ -6613,7 +6811,8 @@ export function ProjectionCalculator() {
       const dx = projector.screenSectionPos.x - projector.sectionPos.x;
       const dy = projector.screenSectionPos.y - projector.sectionPos.y;
       const distPx = Math.sqrt(dx * dx + dy * dy);
-      const throwDistFeet = (distPx / 108) * feetPerInch;
+      const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+      const throwDistFeet = (distPx / renderingDPI) * feetPerInch;
 
       // Calculate image dimensions based on throw ratio and aspect ratio
       const imageWidthFeet = throwDistFeet / projector.throwRatio;
@@ -6645,7 +6844,8 @@ export function ProjectionCalculator() {
         const floorViewY = floorRelX * sin + floorRelY * cos;
 
         const heightPx = floorViewY - projViewY;
-        const heightFeet = (heightPx / 108) * feetPerInch;
+        const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+        const heightFeet = (heightPx / renderingDPI) * feetPerInch;
         hangingHeightStr = `  |  Height: ${heightFeet.toFixed(2)} ft`;
       }
 
@@ -6722,6 +6922,19 @@ export function ProjectionCalculator() {
 
   // Fullscreen page view - completely separate from main content
   if (cadFullscreen) {
+    // Detect orientation for responsive toolbar sizing
+    const isLandscape = window.innerWidth > window.innerHeight;
+    // Portrait: 10% smaller, Landscape: ~62% bigger (was 80%, now 10% smaller)
+    const iconSize = isLandscape ? "w-6 h-6" : "w-3.5 h-3.5";
+    const btnPadding = isLandscape ? "p-2.5" : "p-1";
+    const fitBtnPadding = isLandscape ? "px-3 py-1.5" : "px-1.5 py-0.5";
+    const fitBtnText = isLandscape ? "text-sm" : "text-[10px]";
+    const toolbarGap = isLandscape ? 7 : 3;
+    const toolbarPadding = isLandscape ? "7px 14px" : "3px 6px";
+    const zoomFontSize = isLandscape ? "16px" : "10px";
+    const zoomMinWidth = isLandscape ? "54px" : "32px";
+    const dividerHeight = isLandscape ? "h-7" : "h-4";
+
     return (
       <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, backgroundColor: darkMode ? "#0f172a" : "#f1f5f9" }}>
         {/* Fullscreen Viewport */}
@@ -6729,7 +6942,7 @@ export function ProjectionCalculator() {
           {/* Top Toolbar with Close Button */}
           <div style={{
             position: "absolute",
-            top: "calc(env(safe-area-inset-top, 0px) + 8px)",
+            top: "calc(env(safe-area-inset-top, 0px) + 20px)",
             left: "calc(env(safe-area-inset-left, 0px) + 8px)",
             right: "calc(env(safe-area-inset-right, 0px) + 8px)",
             zIndex: 20,
@@ -6741,25 +6954,25 @@ export function ProjectionCalculator() {
             <div style={{
               display: "flex",
               alignItems: "center",
-              gap: 8,
+              gap: toolbarGap,
               backgroundColor: darkMode ? "rgba(30,41,59,0.95)" : "rgba(255,255,255,0.9)",
               backdropFilter: "blur(4px)",
               borderRadius: 9999,
-              padding: "8px 16px",
+              padding: toolbarPadding,
               boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)"
             }}>
               <button
                 onClick={() => setCadZoom((z: number) => Math.max(cadMinZoom, z - 0.1))}
-                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+                className={`${btnPadding} rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
               >
-                <ZoomOut className="w-5 h-5" />
+                <ZoomOut className={iconSize} />
               </button>
-              <span className={`text-sm min-w-[50px] text-center ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{(cadZoom * 100).toFixed(0)}%</span>
+              <span style={{ color: "#fff", fontSize: zoomFontSize, minWidth: zoomMinWidth, textAlign: "center" }}>{(cadZoom * 100).toFixed(0)}%</span>
               <button
                 onClick={() => setCadZoom((z: number) => Math.min(4, z + 0.1))}
-                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+                className={`${btnPadding} rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
               >
-                <ZoomIn className="w-5 h-5" />
+                <ZoomIn className={iconSize} />
               </button>
               <button
                 onClick={() => {
@@ -6773,34 +6986,34 @@ export function ProjectionCalculator() {
                   setCadZoom(fitZoom > 0 ? fitZoom : 1);
                   setCadPanOffset({ x: 0, y: 0 });
                 }}
-                className={`px-3 py-2 text-sm rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+                className={`${fitBtnPadding} ${fitBtnText} rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
               >
                 Fit
               </button>
-              <div className={`border-l h-6 mx-1 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
+              <div className={`border-l ${dividerHeight} mx-0.5 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
               <button
                 onClick={() => setCadRotation((r: number) => (r + 90) % 360)}
-                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+                className={`${btnPadding} rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
               >
-                <RotateCw className="w-5 h-5" />
+                <RotateCw className={iconSize} />
               </button>
               <button
                 onClick={() => { setCadPanMode(!cadPanMode); if (!cadPanMode) setCadLineMode(false); }}
-                className={`p-2 rounded-full transition-colors ${cadPanMode
+                className={`${btnPadding} rounded-full transition-colors ${cadPanMode
                   ? "bg-blue-600 text-white hover:bg-blue-700"
                   : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
                   }`}
               >
-                <Hand className="w-5 h-5" />
+                <Hand className={iconSize} />
               </button>
               <button
                 onClick={() => { setCadLineMode(!cadLineMode); if (!cadLineMode) setCadPanMode(false); }}
-                className={`p-2 rounded-full transition-colors ${cadLineMode
+                className={`${btnPadding} rounded-full transition-colors ${cadLineMode
                   ? "bg-blue-600 text-white hover:bg-blue-700"
                   : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
                   }`}
               >
-                <Ruler className="w-5 h-5" />
+                <Ruler className={iconSize} />
               </button>
               {/* Floor Z button in fullscreen - only in section mode */}
               {cadViewMode === "section" && (
@@ -6815,13 +7028,13 @@ export function ProjectionCalculator() {
                       setCadFloorZVisible(false);
                     }
                   }}
-                  className={`p-2 rounded-full transition-colors ${cadFloorZVisible
+                  className={`${btnPadding} rounded-full transition-colors ${cadFloorZVisible
                     ? "bg-purple-600 text-white hover:bg-purple-700"
                     : (darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200")
                     }`}
                   title="Toggle floor reference marker"
                 >
-                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     {/* Vertical line */}
                     <line x1="12" y1="3" x2="12" y2="21" />
                     {/* Top horizontal line */}
@@ -6836,13 +7049,213 @@ export function ProjectionCalculator() {
                 </button>
               )}
               {/* Close Button */}
-              <div className={`border-l h-6 mx-1 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
+              <div className={`border-l ${dividerHeight} mx-0.5 ${darkMode ? "border-slate-600" : "border-slate-300"}`} />
               <button
                 onClick={() => setCadFullscreen(false)}
-                className={`p-2 rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
+                className={`${btnPadding} rounded-full transition-colors ${darkMode ? "bg-slate-700 hover:bg-slate-600 text-white" : "bg-slate-100 hover:bg-slate-200"}`}
               >
-                <X className="w-5 h-5" />
+                <X className={iconSize} />
               </button>
+            </div>
+          </div>
+
+          {/* Bottom Control Panel - Dropdown + Slider */}
+          <div style={{
+            position: "absolute",
+            bottom: "calc(env(safe-area-inset-bottom, 0px) + 20px)",
+            left: "calc(env(safe-area-inset-left, 0px) + 16px)",
+            right: "calc(env(safe-area-inset-right, 0px) + 16px)",
+            zIndex: 30,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            pointerEvents: "auto",
+          }}>
+            {/* Lock Toggle - only shown when Distance is selected */}
+            {cadFullscreenControl === "throwDistance" && (
+              <div style={{
+                display: "flex",
+                alignItems: "center",
+                gap: isLandscape ? 8 : 6,
+                backgroundColor: darkMode ? "rgba(30,41,59,0.95)" : "rgba(255,255,255,0.9)",
+                backdropFilter: "blur(4px)",
+                borderRadius: 8,
+                padding: isLandscape ? "6px 12px" : "4px 8px",
+                boxShadow: "0 4px 6px -1px rgba(0,0,0,0.1)",
+              }}>
+                <span style={{ color: darkMode ? "#94a3b8" : "#64748b", fontSize: isLandscape ? "12px" : "10px" }}>Lock:</span>
+                <button
+                  onClick={() => setCadDistanceLock("screen")}
+                  style={{
+                    backgroundColor: cadDistanceLock === "screen" ? "#3b82f6" : (darkMode ? "#334155" : "#e2e8f0"),
+                    color: cadDistanceLock === "screen" ? "#fff" : (darkMode ? "#fff" : "#1e293b"),
+                    border: "none",
+                    borderRadius: 6,
+                    padding: isLandscape ? "4px 10px" : "3px 8px",
+                    fontSize: isLandscape ? "12px" : "10px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  Screen
+                </button>
+                <button
+                  onClick={() => setCadDistanceLock("projector")}
+                  style={{
+                    backgroundColor: cadDistanceLock === "projector" ? "#3b82f6" : (darkMode ? "#334155" : "#e2e8f0"),
+                    color: cadDistanceLock === "projector" ? "#fff" : (darkMode ? "#fff" : "#1e293b"),
+                    border: "none",
+                    borderRadius: 6,
+                    padding: isLandscape ? "4px 10px" : "3px 8px",
+                    fontSize: isLandscape ? "12px" : "10px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  Projector
+                </button>
+              </div>
+            )}
+
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: isLandscape ? 12 : 8,
+              backgroundColor: darkMode ? "rgba(30,41,59,0.95)" : "rgba(255,255,255,0.9)",
+              backdropFilter: "blur(4px)",
+              borderRadius: 12,
+              padding: isLandscape ? "10px 16px" : "8px 12px",
+              boxShadow: "0 10px 15px -3px rgba(0,0,0,0.1)",
+              maxWidth: isLandscape ? "500px" : "340px",
+              width: "100%",
+            }}>
+              {/* Dropdown */}
+              <select
+                value={cadFullscreenControl}
+                onChange={(e) => setCadFullscreenControl(e.target.value as typeof cadFullscreenControl)}
+                style={{
+                  backgroundColor: darkMode ? "#334155" : "#e2e8f0",
+                  color: darkMode ? "#fff" : "#1e293b",
+                  border: "none",
+                  borderRadius: 8,
+                  padding: isLandscape ? "8px 10px" : "6px 8px",
+                  fontSize: isLandscape ? "14px" : "11px",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  minWidth: isLandscape ? "140px" : "100px",
+                }}
+              >
+                <option value="throwDistance">Throw Distance</option>
+                <option value="throwRatio">Throw Ratio</option>
+                <option value="lensShift">{cadViewMode === "plan" ? "Lens Shift H" : "Lens Shift V"}</option>
+                <option value="screenYaw">Screen Yaw</option>
+              </select>
+
+              {/* Slider */}
+              {(() => {
+                const proj = getSelectedProjector();
+                const projPos = cadViewMode === "plan" ? proj?.planPos : proj?.sectionPos;
+                const scrPos = cadViewMode === "plan" ? proj?.screenPlanPos : proj?.screenSectionPos;
+                // Calculate scale factor: feet per PDF pixel
+                const feetPerInch = cadScaleMode === "architect"
+                  ? 1 / (architectScales[cadScale] || 0.25)
+                  : parseFloat(cadCustomScale) || 1;
+                const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                const feetPerPx = feetPerInch / renderingDPI;
+                // Calculate throw distance in PDF pixels, then convert to feet
+                const throwDistPx = proj && projPos && scrPos
+                  ? Math.sqrt(Math.pow(projPos.x - scrPos.x, 2) + Math.pow(projPos.y - scrPos.y, 2))
+                  : 0;
+                const throwDistFt = throwDistPx * feetPerPx;
+                // Get lens shift based on view mode
+                const lensShiftValue = cadViewMode === "plan" ? (proj?.lensShiftH || 0) : (proj?.lensShiftV || 0);
+
+                return (
+                  <>
+                    <input
+                      type="range"
+                      min={cadFullscreenControl === "throwDistance" ? 1 : cadFullscreenControl === "throwRatio" ? 0.3 : cadFullscreenControl === "lensShift" ? -100 : -45}
+                      max={cadFullscreenControl === "throwDistance" ? 150 : cadFullscreenControl === "throwRatio" ? 5 : cadFullscreenControl === "lensShift" ? 100 : 45}
+                      step={cadFullscreenControl === "throwDistance" ? 0.5 : cadFullscreenControl === "throwRatio" ? 0.01 : cadFullscreenControl === "lensShift" ? 1 : 1}
+                      value={
+                        cadFullscreenControl === "throwDistance"
+                          ? throwDistFt
+                          : cadFullscreenControl === "throwRatio"
+                            ? (proj?.throwRatio || 1.5)
+                            : cadFullscreenControl === "lensShift"
+                              ? lensShiftValue
+                              : (proj?.screenYaw || 0)
+                      }
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (cadFullscreenControl === "throwDistance" && proj && projPos && scrPos) {
+                          // Move projector or screen based on lock setting
+                          const newDistPx = val / feetPerPx;
+                          const dx = projPos.x - scrPos.x;
+                          const dy = projPos.y - scrPos.y;
+                          const currentDist = Math.sqrt(dx * dx + dy * dy) || 1;
+                          const ratio = newDistPx / currentDist;
+
+                          if (cadDistanceLock === "screen") {
+                            // Lock screen, move projector
+                            const newX = scrPos.x + dx * ratio;
+                            const newY = scrPos.y + dy * ratio;
+                            if (cadViewMode === "plan") {
+                              updateSelectedProjector({ planPos: { x: newX, y: newY } });
+                            } else {
+                              updateSelectedProjector({ sectionPos: { x: newX, y: newY } });
+                            }
+                          } else {
+                            // Lock projector, move screen
+                            const newX = projPos.x - dx * ratio;
+                            const newY = projPos.y - dy * ratio;
+                            if (cadViewMode === "plan") {
+                              updateSelectedProjector({ screenPlanPos: { x: newX, y: newY } });
+                            } else {
+                              updateSelectedProjector({ screenSectionPos: { x: newX, y: newY } });
+                            }
+                          }
+                        } else if (cadFullscreenControl === "throwRatio") {
+                          updateSelectedProjector({ throwRatio: val });
+                        } else if (cadFullscreenControl === "lensShift") {
+                          if (cadViewMode === "plan") {
+                            updateSelectedProjector({ lensShiftH: val });
+                          } else {
+                            updateSelectedProjector({ lensShiftV: val });
+                          }
+                        } else if (cadFullscreenControl === "screenYaw") {
+                          updateSelectedProjector({ screenYaw: val });
+                        }
+                      }}
+                      style={{
+                        flex: 1,
+                        height: isLandscape ? "8px" : "6px",
+                        accentColor: "#3b82f6",
+                        cursor: "pointer",
+                      }}
+                    />
+
+                    {/* Value Display */}
+                    <span style={{
+                      color: darkMode ? "#fff" : "#1e293b",
+                      fontSize: isLandscape ? "14px" : "11px",
+                      fontWeight: 600,
+                      minWidth: isLandscape ? "70px" : "55px",
+                      textAlign: "right",
+                    }}>
+                      {cadFullscreenControl === "throwDistance"
+                        ? `${throwDistFt.toFixed(1)} ft`
+                        : cadFullscreenControl === "throwRatio"
+                          ? `${(proj?.throwRatio || 1.5).toFixed(2)}:1`
+                          : cadFullscreenControl === "lensShift"
+                            ? `${lensShiftValue.toFixed(0)}%`
+                            : `${(proj?.screenYaw || 0).toFixed(0)}°`}
+                    </span>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
@@ -6864,8 +7277,9 @@ export function ProjectionCalculator() {
               const clickY = e.clientY - containerRect.top;
 
               // Get relative position accounting for pan and zoom
-              const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
-              const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
+              // Pan offset is in screen pixels (applied before scale), so subtract before dividing by zoom
+              const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
+              const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
 
               // Unrotate coordinates
               const radians = (-cadRotation * Math.PI) / 180;
@@ -6932,8 +7346,8 @@ export function ProjectionCalculator() {
             }}
             onMouseMove={(e: React.MouseEvent<HTMLDivElement>) => {
               if (cadIsPanning && cadPanMode) {
-                const dx = (e.clientX - cadPanStart.x) / cadZoom;
-                const dy = (e.clientY - cadPanStart.y) / cadZoom;
+                const dx = e.clientX - cadPanStart.x;
+                const dy = e.clientY - cadPanStart.y;
                 setCadPanOffset((prev: { x: number; y: number }) => constrainPanOffset({ x: prev.x + dx, y: prev.y + dy }, cadZoom));
                 setCadPanStart({ x: e.clientX, y: e.clientY });
                 return;
@@ -6947,8 +7361,9 @@ export function ProjectionCalculator() {
                 const clickY = e.clientY - containerRect.top;
 
                 // Get relative position accounting for pan and zoom
-                const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
-                const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
+                // Pan offset is in screen pixels (applied before scale), so subtract before dividing by zoom
+                const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
+                const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
 
                 // Unrotate coordinates
                 const radians = (-cadRotation * Math.PI) / 180;
@@ -7035,8 +7450,9 @@ export function ProjectionCalculator() {
               const clickY = touch.clientY - containerRect.top;
 
               // Get relative position accounting for pan and zoom
-              const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
-              const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
+              // Pan offset is in screen pixels (applied before scale), so subtract before dividing by zoom
+              const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
+              const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
 
               // Unrotate coordinates
               const radians = (-cadRotation * Math.PI) / 180;
@@ -7128,8 +7544,8 @@ export function ProjectionCalculator() {
               if (e.touches.length !== 1) return;
               const touch = e.touches[0];
               if (cadIsPanning && cadPanMode) {
-                const dx = (touch.clientX - cadPanStart.x) / cadZoom;
-                const dy = (touch.clientY - cadPanStart.y) / cadZoom;
+                const dx = touch.clientX - cadPanStart.x;
+                const dy = touch.clientY - cadPanStart.y;
                 setCadPanOffset((prev: { x: number; y: number }) => constrainPanOffset({ x: prev.x + dx, y: prev.y + dy }, cadZoom));
                 setCadPanStart({ x: touch.clientX, y: touch.clientY });
                 return;
@@ -7143,8 +7559,9 @@ export function ProjectionCalculator() {
                 const clickY = touch.clientY - containerRect.top;
 
                 // Get relative position accounting for pan and zoom
-                const relX = (clickX - centerX) / cadZoom - cadPanOffset.x;
-                const relY = (clickY - centerY) / cadZoom - cadPanOffset.y;
+                // Pan offset is in screen pixels (applied before scale), so subtract before dividing by zoom
+                const relX = (clickX - centerX - cadPanOffset.x) / cadZoom;
+                const relY = (clickY - centerY - cadPanOffset.y) / cadZoom;
 
                 // Unrotate coordinates
                 const radians = (-cadRotation * Math.PI) / 180;
@@ -7237,6 +7654,123 @@ export function ProjectionCalculator() {
         paddingBottom: "140px"
       }}
     >
+      {/* Floating Mini-Preview for CAD Tab */}
+      {activeTab === "cad" && cadMiniPreviewVisible && cadPdfDocument && !cadFullscreen && (
+        <div
+          style={{
+            position: "fixed",
+            right: cadMiniPreviewPosition.x,
+            bottom: cadMiniPreviewPosition.y,
+            zIndex: 9998,
+            borderRadius: "12px",
+            overflow: "hidden",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.3)",
+            border: darkMode ? "2px solid #334155" : "2px solid #e2e8f0",
+            backgroundColor: darkMode ? "#1e293b" : "#fff",
+            cursor: cadMiniPreviewDragging ? "grabbing" : "grab",
+            touchAction: "none",
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setCadMiniPreviewDragging(true);
+            setCadMiniPreviewDragStart({ x: e.clientX, y: e.clientY });
+          }}
+          onMouseMove={(e) => {
+            if (!cadMiniPreviewDragging) return;
+            const dx = cadMiniPreviewDragStart.x - e.clientX;
+            const dy = cadMiniPreviewDragStart.y - e.clientY;
+            setCadMiniPreviewPosition(prev => ({
+              x: Math.max(10, Math.min(window.innerWidth - 150, prev.x + dx)),
+              y: Math.max(100, Math.min(window.innerHeight - 150, prev.y + dy)), // 100px from bottom for toolbar
+            }));
+            setCadMiniPreviewDragStart({ x: e.clientX, y: e.clientY });
+          }}
+          onMouseUp={() => setCadMiniPreviewDragging(false)}
+          onMouseLeave={() => setCadMiniPreviewDragging(false)}
+          onTouchStart={(e) => {
+            const touch = e.touches[0];
+            setCadMiniPreviewDragging(true);
+            setCadMiniPreviewDragStart({ x: touch.clientX, y: touch.clientY });
+          }}
+          onTouchMove={(e) => {
+            if (!cadMiniPreviewDragging) return;
+            const touch = e.touches[0];
+            const dx = cadMiniPreviewDragStart.x - touch.clientX;
+            const dy = cadMiniPreviewDragStart.y - touch.clientY;
+            setCadMiniPreviewPosition(prev => ({
+              x: Math.max(10, Math.min(window.innerWidth - 150, prev.x + dx)),
+              y: Math.max(100, Math.min(window.innerHeight - 150, prev.y + dy)),
+            }));
+            setCadMiniPreviewDragStart({ x: touch.clientX, y: touch.clientY });
+          }}
+          onTouchEnd={() => setCadMiniPreviewDragging(false)}
+        >
+          {/* Close Button */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setCadMiniPreviewDismissed(true);
+              setCadMiniPreviewVisible(false);
+            }}
+            style={{
+              position: "absolute",
+              top: "4px",
+              right: "4px",
+              width: "20px",
+              height: "20px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(0,0,0,0.5)",
+              border: "none",
+              color: "#fff",
+              fontSize: "14px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+            }}
+          >
+            ×
+          </button>
+          {/* Fullscreen button - top left */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setCadFullscreen(true);
+            }}
+            style={{
+              position: "absolute",
+              top: "4px",
+              left: "4px",
+              width: "24px",
+              height: "24px",
+              borderRadius: "6px",
+              backgroundColor: "rgba(0,0,0,0.5)",
+              border: "none",
+              color: "#fff",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+            }}
+          >
+            <Maximize2 className="w-3 h-3" />
+          </button>
+          {/* Preview canvas - tripled size */}
+          <canvas
+            ref={cadMiniPreviewCanvasRef}
+            style={{
+              display: "block",
+              maxWidth: "336px",
+              maxHeight: "240px",
+              width: "auto",
+              height: "auto",
+            }}
+          />
+        </div>
+      )}
+
       {/* Header - Simplified - Hidden on native mobile */}
       {!Capacitor.isNativePlatform() && (
         <div className="flex items-center justify-center mb-6 sm:mb-8 gap-2">
@@ -7505,6 +8039,96 @@ export function ProjectionCalculator() {
         </div>
       )}
 
+      {/* Floating Mini-Preview for Throw Tab */}
+      {activeTab === "projector" && throwMiniPreviewVisible && (
+        <div
+          style={{
+            position: "fixed",
+            right: throwMiniPreviewPosition.x,
+            bottom: throwMiniPreviewPosition.y,
+            zIndex: 9998,
+            borderRadius: "12px",
+            overflow: "hidden",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.3)",
+            border: darkMode ? "2px solid #334155" : "2px solid #e2e8f0",
+            backgroundColor: darkMode ? "#1e293b" : "#fff",
+            cursor: throwMiniPreviewDragging ? "grabbing" : "grab",
+            touchAction: "none",
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setThrowMiniPreviewDragging(true);
+            setThrowMiniPreviewDragStart({ x: e.clientX, y: e.clientY });
+          }}
+          onMouseMove={(e) => {
+            if (!throwMiniPreviewDragging) return;
+            const dx = throwMiniPreviewDragStart.x - e.clientX;
+            const dy = throwMiniPreviewDragStart.y - e.clientY;
+            setThrowMiniPreviewPosition(prev => ({
+              x: Math.max(10, Math.min(window.innerWidth - 150, prev.x + dx)),
+              y: Math.max(100, Math.min(window.innerHeight - 150, prev.y + dy)),
+            }));
+            setThrowMiniPreviewDragStart({ x: e.clientX, y: e.clientY });
+          }}
+          onMouseUp={() => setThrowMiniPreviewDragging(false)}
+          onMouseLeave={() => setThrowMiniPreviewDragging(false)}
+          onTouchStart={(e) => {
+            const touch = e.touches[0];
+            setThrowMiniPreviewDragging(true);
+            setThrowMiniPreviewDragStart({ x: touch.clientX, y: touch.clientY });
+          }}
+          onTouchMove={(e) => {
+            if (!throwMiniPreviewDragging) return;
+            const touch = e.touches[0];
+            const dx = throwMiniPreviewDragStart.x - touch.clientX;
+            const dy = throwMiniPreviewDragStart.y - touch.clientY;
+            setThrowMiniPreviewPosition(prev => ({
+              x: Math.max(10, Math.min(window.innerWidth - 150, prev.x + dx)),
+              y: Math.max(100, Math.min(window.innerHeight - 150, prev.y + dy)),
+            }));
+            setThrowMiniPreviewDragStart({ x: touch.clientX, y: touch.clientY });
+          }}
+          onTouchEnd={() => setThrowMiniPreviewDragging(false)}
+        >
+          {/* Close Button */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setThrowMiniPreviewDismissed(true);
+              setThrowMiniPreviewVisible(false);
+            }}
+            style={{
+              position: "absolute",
+              top: "4px",
+              right: "4px",
+              width: "20px",
+              height: "20px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(0,0,0,0.5)",
+              border: "none",
+              color: "#fff",
+              fontSize: "14px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+            }}
+          >
+            ×
+          </button>
+          {/* Preview canvas */}
+          <canvas
+            ref={throwMiniPreviewCanvasRef}
+            style={{
+              display: "block",
+              width: "350px",
+              height: "300px",
+            }}
+          />
+        </div>
+      )}
+
       {/* Tab Title */}
       <h2 className={`text-lg sm:text-xl font-semibold mb-3 sm:mb-4 ${darkMode ? "text-white" : "text-slate-800"}`}>
         {activeTab === "cad" && "Layout Planner"}
@@ -7517,10 +8141,10 @@ export function ProjectionCalculator() {
       {/* Tab Navigation - iOS Tab Bar */}
       <IOSTabBar
         tabs={[
-          ...(ENABLE_CAD_TAB ? [{ id: "cad", label: "Layout", icon: <CADIcon className="w-8 h-8" /> }] : []),
           { id: "projector", label: "Throw", icon: <ThrowIcon className="w-8 h-8" /> },
           { id: "resolution", label: "Surface", icon: <SurfacesIcon className="w-8 h-8" /> },
           ...(ENABLE_ASPECT_LIVE_TAB ? [{ id: "aspectLive", label: "Aspect", icon: <AspectIcon className="w-8 h-8" /> }] : []),
+          ...(ENABLE_CAD_TAB ? [{ id: "cad", label: "Layout", icon: <CADIcon className="w-8 h-8" /> }] : []),
           ...(ENABLE_LENS_TAB ? [{ id: "lens", label: "Lens", icon: <LensIcon className="w-8 h-8" /> }] : []),
         ]}
         activeTab={activeTab}
@@ -7650,22 +8274,22 @@ export function ProjectionCalculator() {
 
                 <div style={{ height: "1px", background: "rgba(255,255,255,0.1)", margin: "4px 0" }} />
 
-                {/* Import */}
+                {/* Web App */}
                 <button
-                  onClick={() => { projectFileInputRef.current?.click(); setProjectMenuOpen(false); }}
+                  onClick={() => { window.open("https://projection-mapping-toolbox.vercel.app/", "_blank"); setProjectMenuOpen(false); }}
                   style={{ width: "100%", padding: "12px 16px", textAlign: "left", fontSize: "15px", display: "flex", alignItems: "center", gap: "12px", background: "none", border: "none", color: "#fff", cursor: "pointer" }}
                 >
-                  <Upload style={{ width: "18px", height: "18px", color: "rgba(255,255,255,0.6)" }} />
-                  Import JSON
+                  <ExternalLink style={{ width: "18px", height: "18px", color: "rgba(255,255,255,0.6)" }} />
+                  Web App
                 </button>
 
-                {/* Export */}
+                {/* Help */}
                 <button
-                  onClick={() => { exportProject(); setProjectMenuOpen(false); }}
+                  onClick={() => { window.open("mailto:joe.daniel.shea@gmail.com?subject=Projection Calculator Toolbox Help", "_blank"); setProjectMenuOpen(false); }}
                   style={{ width: "100%", padding: "12px 16px", textAlign: "left", fontSize: "15px", display: "flex", alignItems: "center", gap: "12px", background: "none", border: "none", color: "#fff", cursor: "pointer" }}
                 >
-                  <Download style={{ width: "18px", height: "18px", color: "rgba(255,255,255,0.6)" }} />
-                  Export as JSON
+                  <HelpCircle style={{ width: "18px", height: "18px", color: "rgba(255,255,255,0.6)" }} />
+                  Help
                 </button>
 
               </div>
@@ -9087,27 +9711,119 @@ export function ProjectionCalculator() {
               </button>
             </div>
 
-            {/* Close Button */}
-            <button
-              onClick={() => handleTabChange("resolution")}
+            {/* Info and Close Buttons */}
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              {/* Info Button */}
+              <button
+                onClick={() => setAspectLiveInfoOpen(true)}
+                style={{
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  backgroundColor: "rgba(0, 0, 0, 0.5)",
+                  backdropFilter: "blur(10px)",
+                  border: "1px solid rgba(255, 255, 255, 0.2)",
+                  color: "white",
+                  fontSize: "16px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: "bold",
+                }}
+              >
+                ?
+              </button>
+              {/* Close Button */}
+              <button
+                onClick={() => handleTabChange("resolution")}
+                style={{
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  backgroundColor: "rgba(0, 0, 0, 0.5)",
+                  backdropFilter: "blur(10px)",
+                  border: "1px solid rgba(255, 255, 255, 0.2)",
+                  color: "white",
+                  fontSize: "18px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          {/* Info Popup */}
+          {aspectLiveInfoOpen && (
+            <div
               style={{
-                width: "32px",
-                height: "32px",
-                borderRadius: "50%",
-                backgroundColor: "rgba(0, 0, 0, 0.5)",
-                backdropFilter: "blur(10px)",
-                border: "1px solid rgba(255, 255, 255, 0.2)",
-                color: "white",
-                fontSize: "18px",
-                cursor: "pointer",
+                position: "fixed",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "rgba(0, 0, 0, 0.7)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
+                zIndex: 10001,
+                padding: "20px",
               }}
+              onClick={() => setAspectLiveInfoOpen(false)}
             >
-              ×
-            </button>
-          </div>
+              <div
+                style={{
+                  backgroundColor: "#1e293b",
+                  borderRadius: "16px",
+                  padding: "24px",
+                  maxWidth: "400px",
+                  width: "100%",
+                  color: "white",
+                  boxShadow: "0 20px 60px rgba(0, 0, 0, 0.5)",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <h3 style={{ margin: 0, fontSize: "18px", fontWeight: "600" }}>How to Use</h3>
+                  <button
+                    onClick={() => setAspectLiveInfoOpen(false)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "white",
+                      fontSize: "24px",
+                      cursor: "pointer",
+                      padding: "0",
+                      lineHeight: "1",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+                <div style={{ fontSize: "14px", lineHeight: "1.6", color: "#cbd5e1" }}>
+                  <p style={{ margin: "0 0 12px 0" }}>
+                    <strong style={{ color: "#fff" }}>1. Choose a mode:</strong> Use <em>Live</em> for real-time camera or <em>Photo</em> to load an image.
+                  </p>
+                  <p style={{ margin: "0 0 12px 0" }}>
+                    <strong style={{ color: "#fff" }}>2. Resize the rectangle:</strong> Drag the corners to match your projection surface. The aspect ratio updates automatically.
+                  </p>
+                  <p style={{ margin: "0 0 12px 0" }}>
+                    <strong style={{ color: "#fff" }}>3. Move the rectangle:</strong> Drag the center to reposition it over your target area.
+                  </p>
+                  <p style={{ margin: "0 0 12px 0" }}>
+                    <strong style={{ color: "#fff" }}>4. Add regions:</strong> Tap the + button to add up to 12 content regions within the main rectangle.
+                  </p>
+                  <p style={{ margin: "0" }}>
+                    <strong style={{ color: "#fff" }}>5. Select preset ratios:</strong> Use the dropdown to snap to common aspect ratios like 16:9, 4:3, or 21:9.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Bottom Controls */}
           <div style={{
@@ -9932,11 +10648,36 @@ export function ProjectionCalculator() {
               </button>
             </div>
 
-            <div className="relative">
+            <div className="relative" ref={throwMainViewerRef}>
               <canvas
                 ref={projectorCanvasRef}
                 className="w-full border border-slate-300 rounded-lg bg-white"
               ></canvas>
+              {/* Pop-out thumbnail toggle button - positioned over canvas */}
+              <button
+                onClick={() => {
+                  if (throwMiniPreviewVisible) {
+                    setThrowMiniPreviewVisible(false);
+                    setThrowMiniPreviewDismissed(true);
+                  } else {
+                    setThrowMiniPreviewVisible(true);
+                    setThrowMiniPreviewDismissed(false);
+                  }
+                }}
+                style={{
+                  position: "absolute",
+                  top: "8px",
+                  right: "8px",
+                  zIndex: 10,
+                }}
+                className={`p-1.5 rounded-lg transition-colors shadow-md ${throwMiniPreviewVisible
+                  ? (darkMode ? "bg-blue-600 text-white" : "bg-blue-500 text-white")
+                  : (darkMode ? "bg-slate-600 hover:bg-slate-500 text-white" : "bg-slate-500 hover:bg-slate-600 text-white")
+                  }`}
+                title={throwMiniPreviewVisible ? "Hide floating preview" : "Show floating preview"}
+              >
+                <ExternalLink className="w-4 h-4" />
+              </button>
             </div>
 
             {/* Orientation and Scale To - below canvas, labels on top */}
@@ -10706,7 +11447,11 @@ export function ProjectionCalculator() {
 
               {/* CAD Canvas Area */}
               <div
-                ref={cadContainerRef}
+                ref={(el) => {
+                  // Assign to both refs
+                  (cadContainerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+                  (cadMainViewerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+                }}
                 className={`relative border-2 border-dashed rounded-xl overflow-hidden mb-4 sm:mb-6 ${darkMode ? "border-slate-600 bg-slate-800" : "border-slate-300 bg-slate-100"}`}
                 style={{
                   height: "300px",
@@ -11152,7 +11897,8 @@ export function ProjectionCalculator() {
                           const feetPerInch = cadScaleMode === "architect"
                             ? 1 / (architectScales[cadScale] || 0.25)
                             : parseFloat(cadCustomScale) || 1;
-                          const distFeet = (distPx / 108) * feetPerInch;
+                          const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                          const distFeet = (distPx / renderingDPI) * feetPerInch;
                           switch (cadUnit) {
                             case "feet": return distFeet.toFixed(2) + " ft";
                             case "inches": return (distFeet * 12).toFixed(1) + " in";
@@ -11316,7 +12062,8 @@ export function ProjectionCalculator() {
                           const feetPerInch = cadScaleMode === "architect"
                             ? 1 / (architectScales[cadScale] || 0.25)
                             : parseFloat(cadCustomScale);
-                          const distFeet = (distPx / 108) * feetPerInch;
+                          const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                          const distFeet = (distPx / renderingDPI) * feetPerInch;
                           switch (cadUnit) {
                             case "feet": return distFeet.toFixed(2) + " ft";
                             case "inches": return (distFeet * 12).toFixed(1) + " in";
@@ -11343,7 +12090,8 @@ export function ProjectionCalculator() {
                           const feetPerInch = cadScaleMode === "architect"
                             ? 1 / (architectScales[cadScale] || 0.25)
                             : parseFloat(cadCustomScale);
-                          const distFeet = (distPx / 108) * feetPerInch;
+                          const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                          const distFeet = (distPx / renderingDPI) * feetPerInch;
                           const widthFeet = distFeet / cadThrowRatio;
                           switch (cadUnit) {
                             case "feet": return widthFeet.toFixed(2) + " ft";
@@ -11367,7 +12115,8 @@ export function ProjectionCalculator() {
                           const feetPerInch = cadScaleMode === "architect"
                             ? 1 / (architectScales[cadScale] || 0.25)
                             : parseFloat(cadCustomScale);
-                          const distFeet = (distPx / 108) * feetPerInch;
+                          const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                          const distFeet = (distPx / renderingDPI) * feetPerInch;
                           const width = distFeet / cadThrowRatio;
                           const aspectRatios: Record<string, { w: number; h: number }> = {
                             "16:9": { w: 16, h: 9 },
@@ -11419,7 +12168,8 @@ export function ProjectionCalculator() {
                           const feetPerInch = cadScaleMode === "architect"
                             ? 1 / (architectScales[cadScale] || 0.25)
                             : parseFloat(cadCustomScale);
-                          const heightFeet = (heightPx / 108) * feetPerInch;
+                          const renderingDPI = cadScaleMode === "architect" ? getRenderingDPI(cadScale) : 72;
+                          const heightFeet = (heightPx / renderingDPI) * feetPerInch;
                           switch (cadUnit) {
                             case "feet": return heightFeet.toFixed(2) + " ft";
                             case "inches": return (heightFeet * 12).toFixed(1) + " in";
